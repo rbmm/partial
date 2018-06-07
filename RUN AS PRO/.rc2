@@ -1,0 +1,5 @@
+LANGUAGE 0,0
+
+1 RT_MANIFEST ".manifest"
+
+IDI_ICON1 ICON "run.ico"

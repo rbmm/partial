@@ -536,10 +536,10 @@ class CDialog : public ZDllVector
 						SetWindowText(m_arr[0].hwndStatus, L"");
 
 						ULONG err;
-						if (IsDlgButtonChecked(hwnd, IDC_CHECK2) == BST_CHECKED)
+						if (c = wcschr(params.DllFileName, '*'))
 						{
 							params.type = SDP::e_sign;
-							err = CreateSingleDownloadFromGuid(&params);
+							err = CreateSingleDownloadFromGuid(&params, c);
 						}
 						else
 						{
@@ -565,13 +565,13 @@ class CDialog : public ZDllVector
 		return 0;
 	}
 
-	ULONG CreateSingleDownloadFromGuid(SDP* params)
+	ULONG CreateSingleDownloadFromGuid(SDP* params, PWSTR c)
 	{
-		PWSTR lpszName = params->DllFileName;
+		PCWSTR DllFileName = params->DllFileName;
 
-		PWSTR c = wcschr(lpszName, '*'), e;
+		PWSTR e;
 
-		if (!c || c != wcsrchr(lpszName, '*'))
+		if (wcsrchr(c + 1, '*'))
 		{
 			return ERROR_INVALID_PARAMETER;
 		}
@@ -627,7 +627,7 @@ class CDialog : public ZDllVector
 			return ERROR_INVALID_PARAMETER;
 		}
 
-		int len = WideCharToMultiByte(CP_UTF8, 0, lpszName, MAXDWORD, 0, 0, 0, 0);
+		int len = WideCharToMultiByte(CP_UTF8, 0, DllFileName, MAXDWORD, 0, 0, 0, 0);
 
 		if (0 >= len)
 		{
@@ -636,7 +636,7 @@ class CDialog : public ZDllVector
 
 		params->PdbFileName = (PSTR)alloca(len + 1);
 
-		if (0 >= WideCharToMultiByte(CP_UTF8, 0, lpszName, MAXDWORD, params->PdbFileName, len, 0, 0))
+		if (0 >= WideCharToMultiByte(CP_UTF8, 0, DllFileName, MAXDWORD, params->PdbFileName, len, 0, 0))
 		{
 			return ERROR_INVALID_PARAMETER;
 		}

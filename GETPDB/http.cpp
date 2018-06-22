@@ -298,14 +298,17 @@ private:
 
 class CFileDownloadS : public CSSLEndpoint, public CyclicBuferExW
 {
+	enum { e_http_head_max_size = 0x4000 };
 	LARGE_INTEGER _cbBytesNeed;
 	PWSTR _FileName;
 	ZDllVector* _task;
+	PSTR _http_head_buffer;//e_http_head_max_size
 	HANDLE _hRoot;
 	HWND _hwnd;
 	CFileWriter* _pFileWriter;
 	WSABUF _Buffers[2];
 	DWORD _dwBufferCount;
+	ULONG _dwHeadSize;
 	ULONG _dwNumberOfBytesRead;
 	ULONG _ip, _dwGetSize;
 	DWORD _id, _n;
@@ -512,6 +515,7 @@ private:
 
 	virtual BOOL OnConnect(ULONG dwError)
 	{
+		_dwHeadSize = 0;
 		PostMessage(_hwnd, e_connect, _id, dwError);
 
 		return dwError ? (Next(), FALSE) : (_nEnd = 1, _bSSL) ? StartSSL() : OnEndHandshake();
@@ -639,11 +643,70 @@ private:
 	{
 		DbgPrint("%08x.%u:OnUD(%p, %x)\n", GetCurrentThreadId(), STAGE::get()->n, Buf, cbTransferred);
 
-		ULONG cb, len, dwBufferCount, cbReaded = 0;
+		ULONG cb = 0, len, dwBufferCount, cbReaded = 0;
 
 		if (!_cbBytesNeed.QuadPart)
 		{
-			if (cb = CheckResponce(Buf, cbTransferred))
+//#undef DbgPrint
+
+			STATIC_ASTRING(empty_line, "\r\n\r\n");
+
+			DbgPrint("_dwHeadSize=%x _http_head_buffer=%p\n", _dwHeadSize, _http_head_buffer);
+
+			if (_dwHeadSize)
+			{
+				cb = e_http_head_max_size - _dwHeadSize;
+				
+				if (cb > cbTransferred)
+				{
+					cb = cbTransferred;
+				}
+				
+				memcpy(_http_head_buffer + _dwHeadSize, Buf, cb);
+				
+				len = _dwHeadSize, _dwHeadSize += cb;
+
+				if (!strnstr(_dwHeadSize, _http_head_buffer, LP(empty_line)))
+				{
+					DbgPrint("_dwHeadSize=%x->%x\n", len, _dwHeadSize);
+
+					if (e_http_head_max_size != _dwHeadSize)
+					{
+						return TRUE;
+					}
+					_bRead = FALSE;
+					return FALSE;
+				}
+
+				if (cb = CheckResponce(_http_head_buffer, _dwHeadSize))
+				{
+					cb -= len;
+					DbgPrint("final_1 _dwHeadSize=%x(%x)\n", cb, len);
+				}
+			}
+			else if (strnstr(cbTransferred, Buf, LP(empty_line)))
+			{
+				cb = CheckResponce(Buf, cbTransferred);
+				DbgPrint("final_0 _dwHeadSize=%x\n", cb);
+			}
+			else
+			{
+				if (
+					cbTransferred >= e_http_head_max_size ||
+					(!_http_head_buffer && !(_http_head_buffer = new char[e_http_head_max_size]))
+					)
+				{
+					DbgPrint("bad header\n");
+					_bRead = FALSE;
+					return FALSE;
+				}
+				memcpy(_http_head_buffer, Buf, cbTransferred);
+				_dwHeadSize = cbTransferred;
+				DbgPrint("partial data, first _dwHeadSize=%x\n", cbTransferred);
+				return TRUE;
+			}
+
+			if (cb)
 			{
 				UNICODE_STRING ObjectName;
 				OBJECT_ATTRIBUTES oa = { sizeof(oa), _hRoot, &ObjectName };
@@ -664,6 +727,8 @@ private:
 				}
 
 				PostMessage(_hwnd, e_length, _id, _cbBytesNeed.LowPart);
+
+				DbgPrint("head size=%x, data size=%x(%x)\n", cb, cbTransferred, cbTransferred - cb);
 
 				if (!(cbTransferred -= cb))
 				{
@@ -695,6 +760,7 @@ private:
 				}
 				return FALSE;
 			}
+//#define DbgPrint /##/
 		}
 
 		if (_bSSL)
@@ -715,6 +781,11 @@ private:
 						}
 					}
 				} while (pBuf++, --dwBufferCount);
+			}
+
+			if (cbTransferred)
+			{
+				__debugbreak();
 			}
 		}
 		else
@@ -776,6 +847,10 @@ private:
 			_pFileWriter->Release();
 		}
 
+		if (_http_head_buffer)
+		{
+			delete [] _http_head_buffer;
+		}
 		_task->DecActive();
 		_task->Release();
 	}
@@ -788,6 +863,7 @@ private:
 
 		_dwBufferCount = 0;
 		_dwNumberOfBytesRead = 0;
+		_dwHeadSize = 0;
 
 		if (_bRedirected)
 		{
@@ -912,7 +988,7 @@ public:
 		_bRedirected = FALSE;
 		_pFileWriter = 0;
 		_FileName = 0;
-
+		_http_head_buffer = 0;
 		task->AddRef();
 		task->IncActive();
 		_task = task;

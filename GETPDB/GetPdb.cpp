@@ -200,20 +200,46 @@ class CDialog : public ZDllVector
 		SetFocus(hwndCtrl);
 	}
 
-	void toCtrl(HWND hwnd, HWND hwndCtrl, ULONG status, PCWSTR caption)
+	void toCtrl(HWND hwnd, HWND hwndCtrl, ULONG error, PCWSTR caption)
 	{
-		WCHAR err[256];
-		FormatWin32Status(err, status);
-		MessageBox(hwnd, err, caption, MB_ICONWARNING);
-		SetFocus(hwndCtrl);
+		NTSTATUS status = RtlGetLastNtStatus();
+		if (RtlNtStatusToDosError(status) == error)
+		{
+			toCtrl(hwnd, hwndCtrl, status, caption);
+		}
+		else
+		{
+			WCHAR err[256];
+			FormatWin32Status(err, error);
+			SetFocus(hwndCtrl);
+			MessageBox(hwnd, err, caption, MB_ICONWARNING);
+		}
 	}
 
 	void toCtrl(HWND hwnd, HWND hwndCtrl, NTSTATUS status, PCWSTR caption)
 	{
 		WCHAR err[256];
 		FormatNTStatus(err, status);
-		MessageBox(hwnd, err, caption, MB_ICONWARNING);
+		UINT type;
+		switch ((ULONG)status >> 30)
+		{
+		case 0:
+			type = MB_OK;
+			break;
+		case 1:
+			type = MB_OK|MB_ICONINFORMATION;
+			break;
+		case 2:
+			type = MB_OK|MB_ICONWARNING;
+			break;
+		case 3:
+			type = MB_OK|MB_ICONHAND;
+			break;
+		default:__assume(false);
+		}
 		SetFocus(hwndCtrl);
+		MessageBox(hwnd, err, caption, type);
+
 	}
 
 	BOOL OpenFolder(HWND hwnd, HWND hwndCtrl)
@@ -386,9 +412,10 @@ class CDialog : public ZDllVector
 			break;
 
 		case e_connect:
+		case e_connect2:
 			if ((NTSTATUS)lParam)
 			{
-				swprintf(sz, L"connect error %x", (ULONG)lParam);
+				swprintf(sz, L"connect(%u) error %x", uMsg - e_connect, (ULONG)lParam);
 				SetWindowText(m_arr[wParam].hwndStatus, sz);
 				SetOverallProgress((NTSTATUS)lParam);
 			}
@@ -738,7 +765,7 @@ void _ep()
 	case STATUS_IMAGE_ALREADY_LOADED:
 		IO_STATUS_BLOCK iosb;
 		STATIC_OBJECT_ATTRIBUTES(oa, "\\device\\69766781178D422cA183775611A8EE55");
-		ZwOpenFile(&g_hDrv, SYNCHRONIZE, &oa, &iosb, FILE_SHARE_VALID_FLAGS, FILE_SYNCHRONOUS_IO_NONALERT);
+		NtOpenFile(&g_hDrv, SYNCHRONIZE, &oa, &iosb, FILE_SHARE_VALID_FLAGS, FILE_SYNCHRONOUS_IO_NONALERT);
 		break;
 	}
 

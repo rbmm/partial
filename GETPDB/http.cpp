@@ -174,7 +174,7 @@ public:
 
 	BOOL IsCreated()
 	{
-		return m_hFile != 0;
+		return getFileUnsafe() != 0;
 	}
 
 	CFileWriter(CyclicBuferExW* pDD) : _pDD(pDD)
@@ -184,13 +184,13 @@ public:
 
 	void Cleanup()
 	{
-		if (m_hFile)
+		if (HANDLE hFile = getFileUnsafe())
 		{
 			if (_ByteOffset.QuadPart < _EndOfFile.QuadPart)
 			{
 				IO_STATUS_BLOCK iosb;
 				static FILE_DISPOSITION_INFORMATION fdi = { TRUE };
-				NtSetInformationFile(m_hFile, &iosb, &fdi, sizeof(fdi), FileDispositionInformation);
+				NtSetInformationFile(hFile, &iosb, &fdi, sizeof(fdi), FileDispositionInformation);
 			}
 
 			Close();
@@ -204,13 +204,13 @@ public:
 		if (NT_IRP* irp = new NT_IRP(this, opWrite, 0, 0))
 		{
 			_pDD->WriteBegin();
-			irp->CheckNtStatus(NtWriteFileGather(m_hFile, 0, 0, irp, irp, SegmentArray, Length, &_ByteOffset, 0));
+			irp->CheckNtStatus(NtWriteFileGather(getFileUnsafe(), 0, 0, irp, irp, SegmentArray, Length, &_ByteOffset, 0));
 		}
 	}
 
 	NTSTATUS Create(POBJECT_ATTRIBUTES poa, PLARGE_INTEGER EndOfFile)
 	{
-		if (m_hFile) __debugbreak();
+		if (getFileUnsafe()) __debugbreak();
 
 		//DbgPrint("<%p>eof=%I64x\n", this, EndOfFile->QuadPart);
 
@@ -258,7 +258,7 @@ public:
 			if (_EndOfFile.QuadPart < _ByteOffset.QuadPart)
 			{
 				IO_STATUS_BLOCK iosb;
-				NtSetInformationFile(m_hFile, &iosb, &_EndOfFile, sizeof(_EndOfFile), FileEndOfFileInformation);
+				NtSetInformationFile(getFileUnsafe(), &iosb, &_EndOfFile, sizeof(_EndOfFile), FileEndOfFileInformation);
 			}
 
 			return TRUE;
@@ -516,7 +516,7 @@ private:
 	virtual BOOL OnConnect(ULONG dwError)
 	{
 		_dwHeadSize = 0;
-		PostMessage(_hwnd, e_connect, _id, dwError);
+		PostMessage(_hwnd, e_connect2, _id, RtlGetLastNtStatus());
 
 		return dwError ? (Next(), FALSE) : (_nEnd = 1, _bSSL) ? StartSSL() : OnEndHandshake();
 	}

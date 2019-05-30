@@ -803,6 +803,7 @@ RUNDOWN_REF * g_IoRundown = &g_myRR;
 void ep(void*)
 {
 	initterm();
+
 	_ep();
 
 	g_IoRundown->BeginRundown();

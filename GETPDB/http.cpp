@@ -22,8 +22,8 @@ _NT_BEGIN
 #include "dllVector.h"
 
 BOOL IsValidPDBExist(POBJECT_ATTRIBUTES poa, PGUID Signature, DWORD Age);
-//
-#define DbgPrint /##/
+
+//#undef DbgPrint
 
 PSTR ParseHTTPStatusLine(PSTR buf, ULONG cb, PULONG pStatusCode, PULONG pdwMajorVersion = 0, PULONG pdwMinorVersion = 0)
 {
@@ -132,26 +132,9 @@ void GetHTTPHeaders(PSTR buf, ULONG hash[], PSTR values[], ULONG n)
 
 //ULONG gTlsIndex;
 
-//struct STAGE 
-//{
-//	ULONG n;
-//
-//	static STAGE* get()
-//	{
-//		STAGE* p = (STAGE*)TlsGetValue(gTlsIndex);
-//		if (!p)
-//		{
-//			p = new STAGE;
-//			p->n = 0;
-//			TlsSetValue(gTlsIndex, p);
-//		}
-//		return p;
-//	}
-//};
-
 class CFileDownload;
 
-class __declspec(novtable) CyclicBuferExW : public CyclicBuferEx
+class __declspec(novtable) CyclicBuferExW : public ZRingBuffer
 {
 public:
 	virtual void WriteBegin() = 0;
@@ -159,9 +142,74 @@ public:
 	virtual void OnWriteError() = 0;
 };
 
+namespace SI {
+	ULONG dwAllocationGranularity, dwPageSize;
+
+	struct __{
+
+		__(){
+			SYSTEM_INFO si;
+			GetSystemInfo(&si);
+
+			if ((si.dwAllocationGranularity & (si.dwAllocationGranularity - 1)) ||
+				(si.dwPageSize & (si.dwPageSize - 1)))
+			{
+				__debugbreak();
+			}
+
+			dwAllocationGranularity = si.dwAllocationGranularity - 1;
+			dwPageSize = si.dwPageSize;
+		}
+	} _;
+};
+
+NTSTATUS InitBytesPerSector(HANDLE hFile, PULONG pBytesPerSector)
+{
+	IO_STATUS_BLOCK iosb;
+
+	union {
+		FILE_FS_SECTOR_SIZE_INFORMATION ffssi;
+		FILE_FS_SIZE_INFORMATION ffsi;
+	};
+
+	NTSTATUS status = NtQueryVolumeInformationFile(hFile, &iosb, &ffssi, sizeof(ffssi), FileFsSectorSizeInformation);
+
+	ULONG BytesPerSector;
+
+	if (0 <= status)
+	{
+		BytesPerSector = ffssi.PhysicalBytesPerSectorForPerformance;
+	}
+	else
+	{
+		status = NtQueryVolumeInformationFile(hFile, &iosb, &ffsi, sizeof(ffsi), FileFsSizeInformation);
+
+		if (0 > status)
+		{
+			return status;
+		}
+
+		BytesPerSector = ffsi.BytesPerSector;
+	}
+
+	if ( ((BytesPerSector - 1) & BytesPerSector) || BytesPerSector > 0x10000)
+	{
+		return STATUS_UNSUCCESSFUL;
+	}
+
+	if (BytesPerSector < SI::dwPageSize)
+	{
+		BytesPerSector = SI::dwPageSize;
+	}
+
+	*pBytesPerSector = BytesPerSector;
+
+	return STATUS_SUCCESS;
+}
+
 class CFileWriter : public IO_OBJECT
 {
-	enum { opWrite };
+	enum { opWrite, opCmp };
 	LARGE_INTEGER _ByteOffset, _EndOfFile;
 	CyclicBuferExW* _pDD;
 
@@ -174,7 +222,7 @@ public:
 
 	BOOL IsCreated()
 	{
-		return getFileUnsafe() != 0;
+		return getHandleNoLock() != 0;
 	}
 
 	CFileWriter(CyclicBuferExW* pDD) : _pDD(pDD)
@@ -184,7 +232,7 @@ public:
 
 	void Cleanup()
 	{
-		if (HANDLE hFile = getFileUnsafe())
+		if (HANDLE hFile = getHandleNoLock())
 		{
 			if (_ByteOffset.QuadPart < _EndOfFile.QuadPart)
 			{
@@ -197,26 +245,47 @@ public:
 		}
 	}
 
-	void Write(PFILE_SEGMENT_ELEMENT SegmentArray, ULONG Length)
+	void Write(PFILE_SEGMENT_ELEMENT aSegmentArray, ULONG Length)
 	{
-		//DbgPrint("%08x.%u:BeginWrite<%p>(%08x->%I64x)\n", GetCurrentThreadId(), STAGE::get()->n, this, Length, _ByteOffset.QuadPart);
+		DbgPrint("%08x:BeginWrite<%p>(%08x->%I64x)\n", GetCurrentThreadId(), this, Length, _ByteOffset.QuadPart);
+
+		if (_ByteOffset.QuadPart >= _EndOfFile.QuadPart)
+		{
+			//__debugbreak();
+			return ;
+		}
 
 		if (NT_IRP* irp = new NT_IRP(this, opWrite, 0, 0))
 		{
 			_pDD->WriteBegin();
-			irp->CheckNtStatus(NtWriteFileGather(getFileUnsafe(), 0, 0, irp, irp, SegmentArray, Length, &_ByteOffset, 0));
+
+			NTSTATUS status = STATUS_INVALID_HANDLE;
+
+			HANDLE hFile;
+			if (LockHandle(hFile))
+			{
+				status = NtWriteFileGather(hFile, 0, 0, irp, irp, aSegmentArray, Length, &_ByteOffset, 0);
+				//if (status != STATUS_PENDING)__debugbreak();//$$$
+				UnlockHandle();
+			}
+			irp->CheckNtStatus(status);
+		}
+		else
+		{
+			_pDD->OnWriteError();
 		}
 	}
 
 	NTSTATUS Create(POBJECT_ATTRIBUTES poa, PLARGE_INTEGER EndOfFile)
 	{
-		if (getFileUnsafe()) __debugbreak();
+		if (getHandleNoLock()) __debugbreak();
 
-		//DbgPrint("<%p>eof=%I64x\n", this, EndOfFile->QuadPart);
+		DbgPrint("<%p>eof=%I64x\n", this, EndOfFile->QuadPart);
 
 		HANDLE hFile;
 		IO_STATUS_BLOCK iosb;
-		NTSTATUS status = NtCreateFile(&hFile, DELETE|FILE_GENERIC_READ|FILE_GENERIC_WRITE&~FILE_APPEND_DATA, poa, &iosb,
+
+		NTSTATUS status = NtCreateFile(&hFile, DELETE|FILE_WRITE_DATA|FILE_READ_DATA, poa, &iosb,
 			EndOfFile, 0, FILE_SHARE_VALID_FLAGS, FILE_OVERWRITE_IF, 
 			FILE_NON_DIRECTORY_FILE|FILE_NO_INTERMEDIATE_BUFFERING, 0, 0);
 
@@ -225,23 +294,26 @@ public:
 			return status;
 		}
 
+		Assign(hFile);
+
 		_ByteOffset.QuadPart = 0;
 		_EndOfFile.QuadPart = EndOfFile->QuadPart;
 
-		static USHORT cmp = COMPRESSION_FORMAT_NONE;
-		if (NtFsControlFile(hFile, 0, 0, 0, &iosb, FSCTL_SET_COMPRESSION, &cmp, sizeof(cmp), 0, 0) == STATUS_PENDING)
+		if (0 <= (status = NT_IRP::RtlBindIoCompletion(hFile)))
 		{
-			WaitForSingleObject(hFile, INFINITE);
-		}
-		NtSetInformationFile(hFile, &iosb, EndOfFile, sizeof(*EndOfFile), FileEndOfFileInformation);
-		if (0 > NtSetInformationFile(hFile, &iosb, EndOfFile, sizeof(*EndOfFile), FileValidDataLengthInformation))
-		{
-			//__debugbreak();
+			static USHORT cmp = COMPRESSION_FORMAT_NONE;
+
+			if (NT_IRP* irp = new NT_IRP(this, opCmp, 0))
+			{
+				status = NtFsControlFile(hFile, 0, 0, irp, irp, FSCTL_SET_COMPRESSION, &cmp, sizeof(cmp), 0, 0);
+
+				DbgPrint("%x>SET_COMPRESSION>%x %x %p\n", GetCurrentThreadId(), status, irp->Status, irp->Information);
+
+				irp->CheckNtStatus(status);
+			}
 		}
 
-		Assign(hFile);
-
-		return NT_IRP::RtlBindIoCompletion(hFile);
+		return status;
 	}
 
 	BOOL OnWrite(NTSTATUS status, ULONG_PTR dwNumberOfBytesTransfered)
@@ -254,23 +326,22 @@ public:
 
 		if (_EndOfFile.QuadPart <= _ByteOffset.QuadPart)//<
 		{
-			//DbgPrint("%08x:onwrite end<%p>(%08x)\n", GetCurrentThreadId(), this, dwNumberOfBytesTransfered);
+			DbgPrint("%08x:onwrite end<%p>(%08x)\n", GetCurrentThreadId(), this, dwNumberOfBytesTransfered);
+
 			if (_EndOfFile.QuadPart < _ByteOffset.QuadPart)
 			{
 				IO_STATUS_BLOCK iosb;
-				NtSetInformationFile(getFileUnsafe(), &iosb, &_EndOfFile, sizeof(_EndOfFile), FileEndOfFileInformation);
+				NtSetInformationFile(getHandleNoLock(), &iosb, &_EndOfFile, sizeof(_EndOfFile), FileEndOfFileInformation);
 			}
 
 			return TRUE;
 		}
 
-		//ULONG n = ++STAGE::get()->n;
-		//DbgPrint("\n%08x.%u:+++++++++ OnWriteEnd<%p>(%08x->%I64x) +++++++++\n", GetCurrentThreadId(), n, this, dwNumberOfBytesTransfered, bo);
+		DbgPrint("\n%08x:+++++++++ OnWriteEnd<%p>(%08x->%I64x) +++++++++\n", GetCurrentThreadId(), this, dwNumberOfBytesTransfered, bo);
 
-		_pDD->OnWriteEnd((ULONG)dwNumberOfBytesTransfered);
+		_pDD->EndRead((ULONG)dwNumberOfBytesTransfered);
 
-		//DbgPrint("%08x.%u:-------- OnWriteEnd<%p>(%08x->%I64x) ----------\n", GetCurrentThreadId(), n,
-		//	this, dwNumberOfBytesTransfered, bo);
+		DbgPrint("%08x:-------- OnWriteEnd<%p>(%08x->%I64x) ----------\n", GetCurrentThreadId(), this, dwNumberOfBytesTransfered, bo);
 
 		return TRUE;
 	}
@@ -279,6 +350,26 @@ private:
 	{
 		switch(Code)
 		{
+		case opCmp:
+			if (0 <= status)
+			{
+				HANDLE hFile;
+				if (LockHandle(hFile))
+				{
+					IO_STATUS_BLOCK iosb;
+					status = NtSetInformationFile(hFile, &iosb, &_EndOfFile, sizeof(_EndOfFile), FileEndOfFileInformation);
+
+					if (0 > status)__debugbreak();
+					DbgPrint("%x>EndOfFile=%x\n", GetCurrentThreadId(), status);
+
+					status = NtSetInformationFile(hFile, &iosb, &_EndOfFile, sizeof(_EndOfFile), FileValidDataLengthInformation);
+					if (0 > status)__debugbreak();
+
+					DbgPrint("%x>ValidDataLength=%x\n", GetCurrentThreadId(), status);
+					UnlockHandle();
+				}
+			}
+			break;
 		case opWrite:
 			Code = OnWrite(status, dwNumberOfBytesTransfered);
 			_pDD->WriteCompleted();
@@ -287,7 +378,7 @@ private:
 				break;
 			}
 		default:
-			__debugbreak();
+			//__debugbreak();
 			_pDD->OnWriteError();
 		}
 	}
@@ -301,26 +392,37 @@ class CFileDownloadS : public CSSLEndpoint, public CyclicBuferExW
 	enum { e_http_head_max_size = 0x4000 };
 	LARGE_INTEGER _cbBytesNeed;
 	PWSTR _FileName;
-	ZDllVector* _task;
 	PSTR _http_head_buffer;//e_http_head_max_size
+	ZDllVector* _task;
 	HANDLE _hRoot;
 	HWND _hwnd;
 	CFileWriter* _pFileWriter;
 	WSABUF _Buffers[2];
-	DWORD _dwBufferCount;
+	ULONG _dwBufferCount;
 	ULONG _dwHeadSize;
 	ULONG _dwNumberOfBytesRead;
-	ULONG _ip, _dwGetSize;
-	DWORD _id, _n;
+	ULONG _ip;
+	ULONG _BytesPerSector;
+	ULONG _id, _n, _dwExtraSize, _dwGetDataSize;
 	INTERNET_PORT _nPort;
 	short _nEnd;
-	char _state;
 	BOOLEAN _bHandshakeDone, _bSSL, _bRead, _bRedirected;
+
 private:
+
+	virtual ULONG GetMinWriteBufferSize()
+	{ 
+		return max(getMaximumMessage(), _BytesPerSector); 
+	}
+
+	virtual ULONG GetMinReadBufferSize()
+	{ 
+		return _BytesPerSector; 
+	}
 
 	void DoEnd()
 	{
-		if (!_InterlockedDecrement16(&_nEnd))
+		if (!InterlockedDecrementNoFence16(&_nEnd))
 		{
 			_pFileWriter->Cleanup();
 			Next();
@@ -330,7 +432,7 @@ private:
 	virtual void WriteBegin() 
 	{
 		AddRef();
-		_InterlockedIncrement16(&_nEnd);
+		InterlockedIncrementNoFence16(&_nEnd);
 	}
 
 	virtual void WriteCompleted() 
@@ -344,14 +446,62 @@ private:
 		Disconnect();
 	}
 
-	virtual void WriteFrom(PFILE_SEGMENT_ELEMENT SegmentArray, ULONG Len)
+	virtual void BeginRead(WSABUF* lpBuffers, ULONG dwBufferCount)
 	{
-		DbgPrint("%08x.%u:WriteFrom<%p>(%x)\n", GetCurrentThreadId(), STAGE::get()->n, this, Len);
-		_pFileWriter->Write(SegmentArray, Len);
+		if (!dwBufferCount)
+		{
+			return ;
+		}
+
+		WSABUF* p = lpBuffers;
+		int len;
+		ULONG n = dwBufferCount, elementCount = 1, Length = 0;
+		do 
+		{
+			--n;
+			if (len = p++->len)
+			{
+				if (n && (len & (SI::dwPageSize - 1))) 
+				{
+					__debugbreak();
+					return ;
+				}
+				elementCount += (len +  SI::dwPageSize - 1) / SI::dwPageSize ;
+			}
+		} while (n);
+
+		union {
+			PVOID buf;
+			PFILE_SEGMENT_ELEMENT aSegmentArray;
+		};
+
+		buf = alloca(elementCount * sizeof(FILE_SEGMENT_ELEMENT));
+		PFILE_SEGMENT_ELEMENT pse = aSegmentArray;
+
+		do 
+		{
+			PCHAR Buffer = lpBuffers->buf;
+			if (len = lpBuffers++->len)
+			{
+				Length += len;
+				do 
+				{
+					pse++->Buffer = PtrToPtr64(Buffer);
+				} while (Buffer += SI::dwPageSize, 0 < (len -= SI::dwPageSize));
+			}
+		} while (--dwBufferCount);
+
+		pse->Buffer = 0;
+
+		DbgPrint("%08x:WriteFrom<%p>(%x)\n", GetCurrentThreadId(), this, Length);
+
+		_pFileWriter->Write(aSegmentArray, Length & ~(_BytesPerSector - 1));
 	}
 
 	virtual ULONG GetRecvBuffers(WSABUF lpBuffers[2], void** ppv)
 	{
+		DbgPrint("%08x:GetRecvBuffers_0\n", GetCurrentThreadId());
+
 		if (!_bHandshakeDone)
 		{
 			return CTcpEndpoint::GetRecvBuffers(lpBuffers, ppv);
@@ -391,7 +541,7 @@ private:
 			lpBuffers->len = len;
 		}
 
-		DbgPrint("%08x.%u:GetRecvBuffers(%x, %x, %x)\n", GetCurrentThreadId(), STAGE::get()->n, data_size, len, m_packet->getFreeSize());
+		DbgPrint("%08x:GetRecvBuffers(%x, %x, %x)\n", GetCurrentThreadId(), data_size, len, m_packet->getFreeSize());
 
 		return 1;
 	}
@@ -400,95 +550,51 @@ private:
 	{
 		_dwNumberOfBytesRead = 0;
 
-		if (_state) __debugbreak();
-
-		//ULONG n = ++STAGE::get()->n;
-
-		//DbgPrint("\n%08x.%u:OnRecv begin(%x)\n", GetCurrentThreadId(), n, cbTransferred);
+		DbgPrint("\n%08x:OnRecv begin(%x) {%x}\n", GetCurrentThreadId(), cbTransferred, _bHandshakeDone);
 
 		BOOL f = _bSSL ? OnData(Buf, cbTransferred) : OnUserData(Buf, cbTransferred);
 
 		if (_dwNumberOfBytesRead)
 		{
-			DbgPrint("%08x.%u: ++++ OnRecv:OnReadEnd(%x)\n", GetCurrentThreadId(), n, _dwNumberOfBytesRead);
+			DbgPrint("%08x: ++++ OnRecv:OnReadEnd(%x)\n", GetCurrentThreadId(), _dwNumberOfBytesRead);
 
-			OnReadEnd(_dwNumberOfBytesRead);
+			EndWrite(_dwNumberOfBytesRead);
 			// -> ReadTo() can be called from here
 
-			DbgPrint("%08x.%u: ---- OnRecv:OnReadEnd(%x)\n", GetCurrentThreadId(), n, _dwNumberOfBytesRead);
+			DbgPrint("%08x: ---- OnRecv:OnReadEnd(%x)\n", GetCurrentThreadId(), _dwNumberOfBytesRead);
 
-			if (!_bSSL)
-			{
-				return _bRead ? -1 : 0;
-			}
-
-			char state = _InterlockedExchangeAdd8(&_state, -1);
-
-			//DbgPrint("%08x.%u:OnRecv end[%d]\n", GetCurrentThreadId(), n, state);
-
-			if (f)
-			{
-				switch (state)
-				{
-				case 0:
-					return -1;
-				case 1:
-					return +1;
-				default:
-					__debugbreak();
-					return 0;
-				}
-			}
+			return _bRead ? -1 : 0;
 		}
 
+		DbgPrint("%08x: ++++ OnRecv:OnReadContinue\n", GetCurrentThreadId());
 		return f;
 	}
 
-	virtual void ReadTo(WSABUF* lpBuffers, DWORD dwBufferCount)
+	virtual void BeginWrite(WSABUF* lpBuffers, DWORD dwBufferCount)
 	{
 		if (_bSSL)
 		{
 			_dwBufferCount = dwBufferCount;
 			memcpy(_Buffers, lpBuffers, dwBufferCount * sizeof(WSABUF));
 
-			char state = _InterlockedExchangeAdd8(&_state, +1);
+			DbgPrint("%08x:ReadTo(%d) (%p,%x)\n%c\t(%p,%x)\n", GetCurrentThreadId(), dwBufferCount, lpBuffers->buf, lpBuffers->len, dwBufferCount == 1 ? 0 : ' ', lpBuffers[1].buf, lpBuffers[1].len);
 
-			//DbgPrint("%08x.%u:ReadTo(%d) [%x], (%p,%x)\n%c\t(%p,%x)\n", 
-			//	GetCurrentThreadId(), STAGE::get()->n, state, dwBufferCount,
-			//	lpBuffers->buf, lpBuffers->len, dwBufferCount == 1 ? 0 : ' ',
-			//	lpBuffers[1].buf, lpBuffers[1].len);
-
-			switch (state)
-			{
-			case -1:
-				Recv();
-			case 0:
-				break;
-			default:
-				__debugbreak();
-			}
+			Recv();
 		}
 		else
 		{
+			_dwBufferCount = 0;
 			if (_bRead)
 			{
-				//DbgPrint("%08x.%u:ReadTo [%x], (%p,%x)\n%c\t(%p,%x)\n", 
-				//	GetCurrentThreadId(), STAGE::get()->n, dwBufferCount,
-				//	lpBuffers->buf, lpBuffers->len, dwBufferCount == 1 ? 0 : ' ',
-				//	lpBuffers[1].buf, lpBuffers[1].len);
+				DbgPrint("%08x:ReadTo [%x], (%p,%x)\n%c\t(%p,%x)\n", GetCurrentThreadId(), dwBufferCount, lpBuffers->buf, lpBuffers->len, dwBufferCount == 1 ? 0 : ' ', lpBuffers[1].buf, lpBuffers[1].len);
 
-				Recv(lpBuffers, dwBufferCount, getBuffer());
+				Recv(lpBuffers, dwBufferCount, GetBuffer());
 			}
-			//else
-			//{
-			//	DbgPrint("readto:__nop()\n");
-			//}
+			else
+			{
+				DbgPrint("readto:__nop()\n");
+			}
 		}
-	}
-
-	virtual ULONG GetReadMinSize() 
-	{ 
-		return _bSSL ? getMaximumMessage() : 1; 
 	}
 
 	virtual BOOL IsServer(PBOOLEAN pbMutualAuth = 0)
@@ -502,11 +608,12 @@ private:
 
 	virtual void OnDisconnect()
 	{
+		DbgPrint("%08x:%s<%p> [%u]\n", GetCurrentThreadId(), __FUNCTION__, this, GetTickCount());
+		
 		if (!_bRedirected)
 		{
 			PostMessage(_hwnd, e_disconnect, _id, _pFileWriter->IsCreated() && !_cbBytesNeed.QuadPart);
 		}
-		//DbgPrint("%08x:%s<%p> [%u]\n", GetCurrentThreadId(), __FUNCTION__, this, GetTickCount());
 
 		StopSSL();
 
@@ -516,34 +623,42 @@ private:
 	virtual BOOL OnConnect(ULONG dwError)
 	{
 		_dwHeadSize = 0;
-		PostMessage(_hwnd, e_connect2, _id, RtlGetLastNtStatus());
 
-		return dwError ? (Next(), FALSE) : (_nEnd = 1, _bSSL) ? StartSSL() : OnEndHandshake();
+		PostMessage(_hwnd, e_connect, _id, dwError);
+
+		if (dwError)
+		{
+			Next();
+			return FALSE;
+		}
+
+		_nEnd = 1;
+
+		if (_bSSL && !StartSSL())
+		{
+			return FALSE;
+		}
+
+		ZRingBuffer::Start();
+
+		return  -1;
 	}
 
 	virtual ULONG GetConnectData(void** ppSendBuffer)
 	{
-		if (_bSSL)
-		{
-			return 0;
-		}
-
-		*ppSendBuffer = getBuffer();
-
-		return _dwGetSize;
+		return _bSSL ? 0 : (*ppSendBuffer = ZRingBuffer::GetBuffer(), _dwGetDataSize);
 	}
 
 	virtual BOOL OnEndHandshake()
 	{
-		//DbgPrint("%s<%p>\n", __FUNCTION__, this);
+		DbgPrint("%s<%p>\n", __FUNCTION__, this);
 
 		_bHandshakeDone = TRUE;
-		CyclicBuferEx::Start();
-		_state = 0;
 
-		return _bSSL ? !SendUserData(getBuffer(), _dwGetSize) : -1;
+		return !SendUserData(ZRingBuffer::GetBuffer(), _dwGetDataSize);
 	}
 
+	// return size of headers
 	ULONG CheckResponce(PSTR Buf, ULONG cbTransferred)
 	{
 		ULONG StatusCode, LineCount;
@@ -607,11 +722,35 @@ private:
 									}
 
 									_nPort = _byteswap_ushort(uc.nPort);
-									PSTR buf = (PSTR)alloca(uc.dwUrlPathLength+uc.dwHostNameLength+2);
-									sprintf(buf, "%.*s%c%.*s", 
-										uc.dwHostNameLength, uc.lpszHostName, 0, uc.dwUrlPathLength, uc.lpszUrlPath);
-									_bRedirected = TRUE;
-									FormatRequest(buf, buf + uc.dwHostNameLength+1);
+
+									STATIC_ASTRING(format, "GET %.*s HTTP/1.1\r\n"
+										"Host: %.*s\r\n"
+										"User-Agent: Microsoft-Symbol-Server/10.0.0.0\r\n"
+										"Connection: Close\r\n"
+										"\r\n");
+
+									if (sizeof(format) + uc.dwHostNameLength + uc.dwUrlPathLength <= ZRingBuffer::GetSize())
+									{
+										if (PVOID lpszHostName = _malloca(uc.dwHostNameLength))
+										{
+											memcpy(lpszHostName, uc.lpszHostName, uc.dwHostNameLength);
+
+											PSTR buf = (PSTR)ZRingBuffer::GetBuffer();
+
+											_dwGetDataSize = sprintf(buf, format, 
+												uc.dwUrlPathLength, uc.lpszUrlPath, 
+												uc.dwHostNameLength, lpszHostName);
+
+											memcpy(buf + _dwGetDataSize, lpszHostName, uc.dwHostNameLength);
+
+											buf[uc.dwHostNameLength + _dwGetDataSize] = 0;
+
+											_bRedirected = TRUE;
+
+											_freea(lpszHostName);
+										}
+									}
+
 									return 0;
 								}
 							}
@@ -641,14 +780,13 @@ private:
 
 	virtual BOOL OnUserData(PSTR Buf, ULONG cbTransferred)
 	{
-		DbgPrint("%08x.%u:OnUD(%p, %x)\n", GetCurrentThreadId(), STAGE::get()->n, Buf, cbTransferred);
+		DbgPrint("%08x:OnUserData(%p, %x)\n", GetCurrentThreadId(), Buf, cbTransferred);
 
-		ULONG cb = 0, len, dwBufferCount, cbReaded = 0;
+		ULONG cb, len, dwBufferCount, cbReaded = 0;
 
 		if (!_cbBytesNeed.QuadPart)
 		{
-//#undef DbgPrint
-
+			// first recv
 			STATIC_ASTRING(empty_line, "\r\n\r\n");
 
 			DbgPrint("_dwHeadSize=%x _http_head_buffer=%p\n", _dwHeadSize, _http_head_buffer);
@@ -656,14 +794,14 @@ private:
 			if (_dwHeadSize)
 			{
 				cb = e_http_head_max_size - _dwHeadSize;
-				
+
 				if (cb > cbTransferred)
 				{
 					cb = cbTransferred;
 				}
-				
+
 				memcpy(_http_head_buffer + _dwHeadSize, Buf, cb);
-				
+
 				len = _dwHeadSize, _dwHeadSize += cb;
 
 				if (!strnstr(_dwHeadSize, _http_head_buffer, LP(empty_line)))
@@ -708,6 +846,8 @@ private:
 
 			if (cb)
 			{
+				// 200 ok
+
 				UNICODE_STRING ObjectName;
 				OBJECT_ATTRIBUTES oa = { sizeof(oa), _hRoot, &ObjectName };
 				RtlInitUnicodeString(&ObjectName, _FileName);
@@ -726,25 +866,26 @@ private:
 					return FALSE;
 				}
 
-				PostMessage(_hwnd, e_length, _id, _cbBytesNeed.LowPart);
+				_dwExtraSize = (_BytesPerSector - _cbBytesNeed.LowPart) & (_BytesPerSector - 1);
 
-				DbgPrint("head size=%x, data size=%x(%x)\n", cb, cbTransferred, cbTransferred - cb);
+				PostMessage(_hwnd, e_length, _id, _cbBytesNeed.LowPart);
 
 				if (!(cbTransferred -= cb))
 				{
-					if (!_bSSL) Start();
-					return TRUE;
+					// yet no data
+					return TRUE;// continue read
 				}
 
 				Buf += cb;
 
 				if (!_bSSL)
 				{
-					memcpy(getBuffer(), Buf, cbTransferred);
+					memcpy(ZRingBuffer::GetBuffer(), Buf, cbTransferred);
 				}
 			}
 			else
 			{
+				// redirect or fail
 				_bRead = FALSE;
 				if (!_bRedirected && _task->IsSingle())
 				{
@@ -760,40 +901,31 @@ private:
 				}
 				return FALSE;
 			}
-//#define DbgPrint /##/
 		}
 
-		if (_bSSL)
+		if (_dwBufferCount) 
 		{
-			if (_dwBufferCount) 
+			dwBufferCount = _dwBufferCount;
+			WSABUF* pBuf = _Buffers;
+			do 
 			{
-				dwBufferCount = _dwBufferCount;
-				WSABUF* pBuf = _Buffers;
-				do 
+				if (len = pBuf->len)
 				{
-					if (len = pBuf->len)
+					memcpy(pBuf->buf, Buf, len = min(len, cbTransferred));
+					cbReaded += len, Buf += len, pBuf->len -= len, pBuf->buf += len;
+					if (!(cbTransferred -= len))
 					{
-						memcpy(pBuf->buf, Buf, len = min(len, cbTransferred));
-						cbReaded += len, Buf += len, pBuf->len -= len, pBuf->buf += len;
-						if (!(cbTransferred -= len))
-						{
-							break;
-						}
+						break;
 					}
-				} while (pBuf++, --dwBufferCount);
-			}
-
-			if (cbTransferred)
-			{
-				__debugbreak();
-			}
+				}
+			} while (pBuf++, --dwBufferCount);
 		}
 		else
 		{
 			cbReaded = cbTransferred;
 		}
 
-		DbgPrint("%08x.%u:OnUserData(%x)\n", GetCurrentThreadId(), STAGE::get()->n, cbReaded);
+		DbgPrint("%08x:OnUserData(%x)\n", GetCurrentThreadId(), cbReaded);
 
 		if (cbReaded)
 		{
@@ -802,15 +934,13 @@ private:
 			if (0 >= (_cbBytesNeed.QuadPart -= cbReaded))
 			{
 				_bRead = FALSE;
-				//DbgPrint("%08x.%u:read end (%u)\n", GetCurrentThreadId(), STAGE::get()->n);
+				DbgPrint("%08x:read end (%u)\n", GetCurrentThreadId());
 				// read end
-				ULONG PageSize = getPageSize();
-				_dwNumberOfBytesRead += (PageSize - (getDataSize() + _dwNumberOfBytesRead)) & (PageSize - 1);
-				DbgPrint("%08x.%u:OnUserData-end(%x)\n", GetCurrentThreadId(), STAGE::get()->n, cbReaded);
+				_dwNumberOfBytesRead += _dwExtraSize;
+				DbgPrint("%08x:OnUserData-end(%x)\n", GetCurrentThreadId(), cbReaded);
 			}
 
 			PostMessage(_hwnd, e_recv, _id, _cbBytesNeed.LowPart);
-
 		}
 		else
 		{
@@ -851,19 +981,23 @@ private:
 		{
 			delete [] _http_head_buffer;
 		}
+
+		if (PVOID pv = ZRingBuffer::GetBuffer())
+		{
+			VirtualFree(pv, 0, MEM_RELEASE);
+		}
+
 		_task->DecActive();
 		_task->Release();
 	}
 
 	void Cleanup()
 	{
-		CyclicBufer::Init();
 		_cbBytesNeed.QuadPart = 0;
-		_bHandshakeDone = FALSE, _bRead = TRUE, _state = 0;
+		_bHandshakeDone = FALSE, _bRead = TRUE;
 
 		_dwBufferCount = 0;
 		_dwNumberOfBytesRead = 0;
-		_dwHeadSize = 0;
 
 		if (_bRedirected)
 		{
@@ -885,18 +1019,6 @@ private:
 		}
 	}
 
-	void FormatRequest(PCSTR lpszHostName, PCSTR lpszUrlPath)
-	{
-		PSTR buf = (char*)getBuffer();
-		_dwGetSize = sprintf(buf, 
-			"GET %s HTTP/1.1\r\n"
-			"Host: %s\r\n"
-			"User-Agent: Microsoft-Symbol-Server/10.0.0.0\r\n"
-			"Connection: Close\r\n"
-			"\r\n", lpszUrlPath, lpszHostName);
-
-		strcpy(buf + _dwGetSize, lpszHostName);
-	}
 public:
 
 	void Start()
@@ -917,7 +1039,7 @@ public:
 		{
 			if (bRedirected)
 			{
-				DnsToIp((char*)getBuffer() + _dwGetSize);
+				DnsToIp((PCSTR)ZRingBuffer::GetBuffer() + _dwGetDataSize);
 				return;
 			}
 
@@ -989,6 +1111,8 @@ public:
 		_pFileWriter = 0;
 		_FileName = 0;
 		_http_head_buffer = 0;
+		_BytesPerSector = 0;
+
 		task->AddRef();
 		task->IncActive();
 		_task = task;
@@ -1049,6 +1173,37 @@ public:
 		return status;
 	}
 
+	NTSTATUS AllocateRingBuffer(HANDLE hFile)
+	{
+		NTSTATUS status = _BytesPerSector ? STATUS_SUCCESS : InitBytesPerSector(hFile, &_BytesPerSector);
+
+		if (0 <= status)
+		{
+			ULONG s = (2*_BytesPerSector + SI::dwAllocationGranularity) & ~SI::dwAllocationGranularity;
+
+			if (s != ZRingBuffer::GetSize())
+			{
+				PVOID pv = ZRingBuffer::GetBuffer();
+
+				if (pv)
+				{
+					VirtualFree(pv, 0, MEM_RELEASE);
+					ZRingBuffer::Init(0, 0);
+					pv = 0;
+				}
+
+				SIZE_T size = s;
+
+				if (0 <= (status = ZwAllocateVirtualMemory(NtCurrentProcess(), &pv, 0, &size, MEM_COMMIT, PAGE_READWRITE)))
+				{
+					ZRingBuffer::Init(pv, s);
+				}
+			}
+		}
+
+		return status;
+	}
+
 	NTSTATUS Init(PCSTR PdbFileName, PGUID Signature, DWORD Age)
 	{
 		Cleanup();
@@ -1103,8 +1258,11 @@ public:
 
 		RtlInitUnicodeString(&ObjectName, sz);
 
-		status = NtCreateFile(&_hRoot, FILE_ADD_SUBDIRECTORY|SYNCHRONIZE, &oa, &iosb, 0, 
-			0, FILE_SHARE_VALID_FLAGS, FILE_OPEN_IF, FILE_DIRECTORY_FILE, 0, 0);
+		if (0 <= (status = AllocateRingBuffer(hRoot)))
+		{
+			status = NtCreateFile(&_hRoot, FILE_ADD_SUBDIRECTORY|SYNCHRONIZE, &oa, &iosb, 0, 
+				0, FILE_SHARE_VALID_FLAGS, FILE_OPEN_IF, FILE_DIRECTORY_FILE, 0, 0);
+		}
 
 		NtClose(oa.RootDirectory);
 
@@ -1138,13 +1296,18 @@ public:
 			"\r\nHost: msdl.microsoft.com"
 			"\r\nConnection: close\r\n\r\n");
 
-		PSTR buf = (char*)getBuffer();
+		PSTR buf = (PSTR)ZRingBuffer::GetBuffer();
 
-		_dwGetSize = sprintf(buf, 
+		_dwGetDataSize = _snprintf(buf, ZRingBuffer::GetSize(),
 			httpHeader,
 			PdbFileName, Signature->Data1, Signature->Data2, Signature->Data3,
 			Signature->Data4[0], Signature->Data4[1], Signature->Data4[2], Signature->Data4[3], 
 			Signature->Data4[4], Signature->Data4[5], Signature->Data4[6], Signature->Data4[7], Age, PdbFileName);
+
+		if (_dwGetDataSize >= ZRingBuffer::GetSize())
+		{
+			return STATUS_UNSUCCESSFUL;
+		}
 
 		DbgPrint(buf);
 
@@ -1158,12 +1321,12 @@ public:
 			return ERROR_NO_SYSTEM_RESOURCES;
 		}
 
-		if (ULONG dwError = CTcpEndpoint::Create(0x10000))
+		if (ULONG dwError = CTcpEndpoint::Create(SI::dwAllocationGranularity + 1))
 		{
 			return dwError;
 		}
 
-		return CyclicBufer::Create();
+		return NOERROR;
 	}
 };
 

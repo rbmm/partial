@@ -137,9 +137,9 @@ class CFileDownload;
 class __declspec(novtable) CyclicBuferExW : public ZRingBuffer
 {
 public:
-	virtual void WriteBegin() = 0;
-	virtual void WriteCompleted() = 0;
 	virtual void OnWriteError() = 0;
+	virtual void AddRef() = 0;
+	virtual void Release() = 0;
 };
 
 namespace SI {
@@ -216,6 +216,7 @@ class CFileWriter : public IO_OBJECT
 	~CFileWriter()
 	{
 		DbgPrint("%s<%p> %I64x\n", __FUNCTION__, this, _ByteOffset.QuadPart);
+		_pDD->Release();
 	}
 
 public:
@@ -228,6 +229,7 @@ public:
 	CFileWriter(CyclicBuferExW* pDD) : _pDD(pDD)
 	{
 		DbgPrint("%s<%p>\n", __FUNCTION__, this);
+		pDD->AddRef();
 	}
 
 	void Cleanup()
@@ -245,35 +247,33 @@ public:
 		}
 	}
 
-	void Write(PFILE_SEGMENT_ELEMENT aSegmentArray, ULONG Length)
+	// return are EndRead will be called
+	bool Write(PFILE_SEGMENT_ELEMENT aSegmentArray, ULONG Length)
 	{
 		DbgPrint("%08x:BeginWrite<%p>(%08x->%I64x)\n", GetCurrentThreadId(), this, Length, _ByteOffset.QuadPart);
 
-		if (_ByteOffset.QuadPart >= _EndOfFile.QuadPart)
+		if (_ByteOffset.QuadPart < _EndOfFile.QuadPart)
 		{
-			//__debugbreak();
-			return ;
-		}
-
-		if (NT_IRP* irp = new NT_IRP(this, opWrite, 0, 0))
-		{
-			_pDD->WriteBegin();
-
-			NTSTATUS status = STATUS_INVALID_HANDLE;
-
-			HANDLE hFile;
-			if (LockHandle(hFile))
+			if (NT_IRP* irp = new NT_IRP(this, opWrite, 0, 0))
 			{
-				status = NtWriteFileGather(hFile, 0, 0, irp, irp, aSegmentArray, Length, &_ByteOffset, 0);
-				//if (status != STATUS_PENDING)__debugbreak();//$$$
-				UnlockHandle();
+				NTSTATUS status = STATUS_INVALID_HANDLE;
+
+				HANDLE hFile;
+				if (LockHandle(hFile))
+				{
+					status = NtWriteFileGather(hFile, 0, 0, irp, irp, aSegmentArray, Length, &_ByteOffset, 0);
+					UnlockHandle();
+				}
+
+				irp->CheckNtStatus(status);
+
+				return true;
 			}
-			irp->CheckNtStatus(status);
 		}
-		else
-		{
-			_pDD->OnWriteError();
-		}
+
+		_pDD->OnWriteError();
+
+		return false;
 	}
 
 	NTSTATUS Create(POBJECT_ATTRIBUTES poa, PLARGE_INTEGER EndOfFile)
@@ -316,12 +316,8 @@ public:
 		return status;
 	}
 
-	BOOL OnWrite(NTSTATUS status, ULONG_PTR dwNumberOfBytesTransfered)
+	void OnWrite(ULONG_PTR dwNumberOfBytesTransfered)
 	{
-		if (0 > status || !dwNumberOfBytesTransfered) return FALSE;
-
-		//ULONG64 bo = _ByteOffset.QuadPart;
-
 		_ByteOffset.QuadPart += dwNumberOfBytesTransfered;
 
 		if (_EndOfFile.QuadPart <= _ByteOffset.QuadPart)//<
@@ -333,17 +329,9 @@ public:
 				IO_STATUS_BLOCK iosb;
 				NtSetInformationFile(getHandleNoLock(), &iosb, &_EndOfFile, sizeof(_EndOfFile), FileEndOfFileInformation);
 			}
-
-			return TRUE;
 		}
 
-		DbgPrint("\n%08x:+++++++++ OnWriteEnd<%p>(%08x->%I64x) +++++++++\n", GetCurrentThreadId(), this, dwNumberOfBytesTransfered, bo);
-
-		_pDD->EndRead((ULONG)dwNumberOfBytesTransfered);
-
-		DbgPrint("%08x:-------- OnWriteEnd<%p>(%08x->%I64x) ----------\n", GetCurrentThreadId(), this, dwNumberOfBytesTransfered, bo);
-
-		return TRUE;
+		DbgPrint("\n%08x:+++++++++ OnWriteEnd<%p>(%08x->%I64x) +++++++++\n", GetCurrentThreadId(), this, dwNumberOfBytesTransfered, _ByteOffset.QuadPart);
 	}
 private:
 	void IOCompletionRoutine(CDataPacket* /*packet*/, DWORD Code, NTSTATUS status, ULONG_PTR dwNumberOfBytesTransfered, PVOID /*Pointer*/)
@@ -357,23 +345,25 @@ private:
 				if (LockHandle(hFile))
 				{
 					IO_STATUS_BLOCK iosb;
-					status = NtSetInformationFile(hFile, &iosb, &_EndOfFile, sizeof(_EndOfFile), FileEndOfFileInformation);
-
-					if (0 > status)__debugbreak();
-					DbgPrint("%x>EndOfFile=%x\n", GetCurrentThreadId(), status);
-
-					status = NtSetInformationFile(hFile, &iosb, &_EndOfFile, sizeof(_EndOfFile), FileValidDataLengthInformation);
-					if (0 > status)__debugbreak();
-
-					DbgPrint("%x>ValidDataLength=%x\n", GetCurrentThreadId(), status);
+					NtSetInformationFile(hFile, &iosb, &_EndOfFile, sizeof(_EndOfFile), FileEndOfFileInformation);
+					NtSetInformationFile(hFile, &iosb, &_EndOfFile, sizeof(_EndOfFile), FileValidDataLengthInformation);
 					UnlockHandle();
 				}
 			}
 			break;
 		case opWrite:
-			Code = OnWrite(status, dwNumberOfBytesTransfered);
-			_pDD->WriteCompleted();
-			if (Code)
+			if (0 > status || !dwNumberOfBytesTransfered)
+			{
+				dwNumberOfBytesTransfered = 0;
+				status = false;
+			}
+			else
+			{
+				OnWrite(dwNumberOfBytesTransfered);
+				status = true;
+			}
+			_pDD->EndRead((ULONG)dwNumberOfBytesTransfered);
+			if (status)
 			{
 				break;
 			}
@@ -402,43 +392,27 @@ class CFileDownloadS : public CSSLEndpoint, public CyclicBuferExW
 	ULONG _dwHeadSize;
 	ULONG _dwNumberOfBytesRead;
 	ULONG _ip;
-	ULONG _BytesPerSector;
+	ULONG _BytesPerSector, _MinWriteSize;
 	ULONG _id, _n, _dwExtraSize, _dwGetDataSize;
 	INTERNET_PORT _nPort;
-	short _nEnd;
 	BOOLEAN _bHandshakeDone, _bSSL, _bRead, _bRedirected;
 
 private:
-
-	virtual ULONG GetMinWriteBufferSize()
-	{ 
-		return max(getMaximumMessage(), _BytesPerSector); 
-	}
 
 	virtual ULONG GetMinReadBufferSize()
 	{ 
 		return _BytesPerSector; 
 	}
 
-	void DoEnd()
-	{
-		if (!InterlockedDecrementNoFence16(&_nEnd))
-		{
-			_pFileWriter->Cleanup();
-			Next();
-		}
+	virtual ULONG GetMinWriteBufferSize()
+	{ 
+		return _MinWriteSize; 
 	}
 
-	virtual void WriteBegin() 
+	virtual void OnIoStop()
 	{
-		AddRef();
-		InterlockedIncrementNoFence16(&_nEnd);
-	}
-
-	virtual void WriteCompleted() 
-	{
-		DoEnd();
-		Release();
+		_pFileWriter->Cleanup();
+		Next();
 	}
 
 	virtual void OnWriteError() 
@@ -446,11 +420,11 @@ private:
 		Disconnect();
 	}
 
-	virtual void BeginRead(WSABUF* lpBuffers, ULONG dwBufferCount)
+	virtual bool BeginRead(WSABUF* lpBuffers, ULONG dwBufferCount)
 	{
 		if (!dwBufferCount)
 		{
-			return ;
+			return false;
 		}
 
 		WSABUF* p = lpBuffers;
@@ -464,7 +438,7 @@ private:
 				if (n && (len & (SI::dwPageSize - 1))) 
 				{
 					__debugbreak();
-					return ;
+					return false;
 				}
 				elementCount += (len +  SI::dwPageSize - 1) / SI::dwPageSize ;
 			}
@@ -495,12 +469,12 @@ private:
 
 		DbgPrint("%08x:WriteFrom<%p>(%x)\n", GetCurrentThreadId(), this, Length);
 
-		_pFileWriter->Write(aSegmentArray, Length & ~(_BytesPerSector - 1));
+		return _pFileWriter->Write(aSegmentArray, Length & ~(_BytesPerSector - 1));
 	}
 
 	virtual ULONG GetRecvBuffers(WSABUF lpBuffers[2], void** ppv)
 	{
-		DbgPrint("%08x:GetRecvBuffers_0\n", GetCurrentThreadId());
+		DbgPrint("%08x:GetRecvBuffers_0(%x, %x)\n", GetCurrentThreadId(), m_cbSavedData, _dataSize);
 
 		if (!_bHandshakeDone)
 		{
@@ -550,18 +524,18 @@ private:
 	{
 		_dwNumberOfBytesRead = 0;
 
-		DbgPrint("\n%08x:OnRecv begin(%x) {%x}\n", GetCurrentThreadId(), cbTransferred, _bHandshakeDone);
+		DbgPrint("\n%08x:OnRecv begin(%x) {%x}(%x, %x)\n", GetCurrentThreadId(), cbTransferred, _bHandshakeDone, m_cbSavedData, _dataSize);
 
 		BOOL f = _bSSL ? OnData(Buf, cbTransferred) : OnUserData(Buf, cbTransferred);
 
 		if (_dwNumberOfBytesRead)
 		{
-			DbgPrint("%08x: ++++ OnRecv:OnReadEnd(%x)\n", GetCurrentThreadId(), _dwNumberOfBytesRead);
+			DbgPrint("%08x: ++++ OnRecv:OnReadEnd(%x)(%x, %x)\n", GetCurrentThreadId(), _dwNumberOfBytesRead, m_cbSavedData, _dataSize);
 
 			EndWrite(_dwNumberOfBytesRead);
 			// -> ReadTo() can be called from here
 
-			DbgPrint("%08x: ---- OnRecv:OnReadEnd(%x)\n", GetCurrentThreadId(), _dwNumberOfBytesRead);
+			DbgPrint("%08x: ---- OnRecv:OnReadEnd(%x)(%x, %x)\n", GetCurrentThreadId(), _dwNumberOfBytesRead, m_cbSavedData, _dataSize);
 
 			return _bRead ? -1 : 0;
 		}
@@ -570,7 +544,7 @@ private:
 		return f;
 	}
 
-	virtual void BeginWrite(WSABUF* lpBuffers, DWORD dwBufferCount)
+	virtual bool BeginWrite(WSABUF* lpBuffers, DWORD dwBufferCount)
 	{
 		if (_bSSL)
 		{
@@ -595,6 +569,7 @@ private:
 				DbgPrint("readto:__nop()\n");
 			}
 		}
+		return true;
 	}
 
 	virtual BOOL IsServer(PBOOLEAN pbMutualAuth = 0)
@@ -617,7 +592,7 @@ private:
 
 		StopSSL();
 
-		DoEnd();
+		EndWrite(0);
 	}
 
 	virtual BOOL OnConnect(ULONG dwError)
@@ -631,8 +606,6 @@ private:
 			Next();
 			return FALSE;
 		}
-
-		_nEnd = 1;
 
 		if (_bSSL && !StartSSL())
 		{
@@ -654,6 +627,8 @@ private:
 		DbgPrint("%s<%p>\n", __FUNCTION__, this);
 
 		_bHandshakeDone = TRUE;
+
+		_MinWriteSize = (getMaximumMessage() + _BytesPerSector - 1) & ~(_BytesPerSector - 1);
 
 		return !SendUserData(ZRingBuffer::GetBuffer(), _dwGetDataSize);
 	}
@@ -958,12 +933,16 @@ private:
 			{
 				PostMessage(_hwnd, e_connect, _id, err);
 			}
+			else
+			{
+				return ;
+			}
 		}
 		else
 		{
 			PostMessage(_hwnd, e_connect, _id, ERROR_NOT_FOUND);
-			Next();
 		}
+		Next();
 	}
 
 	~CFileDownloadS()
@@ -971,11 +950,6 @@ private:
 		DbgPrint("%08x:%s<%p>\n", GetCurrentThreadId(), __FUNCTION__, this);
 		_bRedirected = FALSE;
 		Cleanup();
-
-		if (_pFileWriter)
-		{
-			_pFileWriter->Release();
-		}
 
 		if (_http_head_buffer)
 		{
@@ -1020,6 +994,16 @@ private:
 	}
 
 public:
+
+	virtual void AddRef()
+	{
+		IO_OBJECT::AddRef();
+	}
+
+	virtual void Release()
+	{
+		IO_OBJECT::Release();
+	}
 
 	void Start()
 	{
@@ -1102,6 +1086,12 @@ public:
 		}
 
 		_task->Unregister(_id);
+
+		if (_pFileWriter)
+		{
+			_pFileWriter->Release();
+			_pFileWriter = 0;
+		}
 	}
 
 	CFileDownloadS(ZDllVector* task) : CSSLEndpoint(task->getCred())
@@ -1112,6 +1102,7 @@ public:
 		_FileName = 0;
 		_http_head_buffer = 0;
 		_BytesPerSector = 0;
+		_MinWriteSize = 0;
 
 		task->AddRef();
 		task->IncActive();
@@ -1179,6 +1170,8 @@ public:
 
 		if (0 <= status)
 		{
+			_MinWriteSize = _BytesPerSector;
+
 			ULONG s = (2*_BytesPerSector + SI::dwAllocationGranularity) & ~SI::dwAllocationGranularity;
 
 			if (s != ZRingBuffer::GetSize())
@@ -1360,6 +1353,10 @@ ULONG CreateSingleDownload(SDP* params)
 			dwError = p->Connect(task->get_ip(), 0x5000);
 		}
 
+		if (dwError)
+		{
+			p->Next();
+		}
 		p->Release();
 	}
 

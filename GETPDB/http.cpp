@@ -412,11 +412,13 @@ private:
 	virtual void OnIoStop()
 	{
 		_pFileWriter->Cleanup();
+		//PostMessage(_hwnd, e_text, _id, (LPARAM)L"IoStop");
 		Next();
 	}
 
 	virtual void OnWriteError() 
 	{
+		PostMessage(_hwnd, e_text, _id, (LPARAM)L"WriteError");
 		Disconnect();
 	}
 
@@ -474,7 +476,7 @@ private:
 
 	virtual ULONG GetRecvBuffers(WSABUF lpBuffers[2], void** ppv)
 	{
-		DbgPrint("%08x:GetRecvBuffers_0(%x, %x)\n", GetCurrentThreadId(), m_cbSavedData, _dataSize);
+		DbgPrint("%08x:GetRecvBuffers_0(%x)\n", GetCurrentThreadId(), _dataSize);
 
 		if (!_bHandshakeDone)
 		{
@@ -524,18 +526,18 @@ private:
 	{
 		_dwNumberOfBytesRead = 0;
 
-		DbgPrint("\n%08x:OnRecv begin(%x) {%x}(%x, %x)\n", GetCurrentThreadId(), cbTransferred, _bHandshakeDone, m_cbSavedData, _dataSize);
+		DbgPrint("\n%08x:OnRecv begin(%x) {%x}(%x)\n", GetCurrentThreadId(), cbTransferred, _bHandshakeDone, _dataSize);
 
 		BOOL f = _bSSL ? OnData(Buf, cbTransferred) : OnUserData(Buf, cbTransferred);
 
 		if (_dwNumberOfBytesRead)
 		{
-			DbgPrint("%08x: ++++ OnRecv:OnReadEnd(%x)(%x, %x)\n", GetCurrentThreadId(), _dwNumberOfBytesRead, m_cbSavedData, _dataSize);
+			DbgPrint("%08x: ++++ OnRecv:OnReadEnd(%x)(%x)\n", GetCurrentThreadId(), _dwNumberOfBytesRead, _dataSize);
 
 			EndWrite(_dwNumberOfBytesRead);
 			// -> ReadTo() can be called from here
 
-			DbgPrint("%08x: ---- OnRecv:OnReadEnd(%x)(%x, %x)\n", GetCurrentThreadId(), _dwNumberOfBytesRead, m_cbSavedData, _dataSize);
+			DbgPrint("%08x: ---- OnRecv:OnReadEnd(%x)(%x)\n", GetCurrentThreadId(), _dwNumberOfBytesRead, _dataSize);
 
 			return _bRead ? -1 : 0;
 		}
@@ -585,7 +587,11 @@ private:
 	{
 		DbgPrint("%08x:%s<%p> [%u]\n", GetCurrentThreadId(), __FUNCTION__, this, GetTickCount());
 		
-		if (!_bRedirected)
+		if (_bRedirected)
+		{
+			PostMessage(_hwnd, e_text, _id, (LPARAM)L"redirect...");
+		}
+		else
 		{
 			PostMessage(_hwnd, e_disconnect, _id, _pFileWriter->IsCreated() && !_cbBytesNeed.QuadPart);
 		}
@@ -625,12 +631,18 @@ private:
 	virtual BOOL OnEndHandshake()
 	{
 		DbgPrint("%s<%p>\n", __FUNCTION__, this);
+		PostMessage(_hwnd, e_text, _id, (LPARAM)L"EndHandshake");
 
 		_bHandshakeDone = TRUE;
 
 		_MinWriteSize = (getMaximumMessage() + _BytesPerSector - 1) & ~(_BytesPerSector - 1);
 
-		return !SendUserData(ZRingBuffer::GetBuffer(), _dwGetDataSize);
+		if (ULONG dwError = SendUserData(ZRingBuffer::GetBuffer(), _dwGetDataSize))
+		{
+			PostMessage(_hwnd, e_send, _id, (LPARAM)dwError);
+			return FALSE;
+		}
+		return TRUE;
 	}
 
 	// return size of headers
@@ -787,6 +799,7 @@ private:
 					{
 						return TRUE;
 					}
+					PostMessageW(_hwnd, e_text, _id, (LPARAM)L"too big http header");
 					_bRead = FALSE;
 					return FALSE;
 				}
@@ -810,6 +823,7 @@ private:
 					)
 				{
 					DbgPrint("bad header\n");
+					PostMessageW(_hwnd, e_text, _id, (LPARAM)L"bad http header");
 					_bRead = FALSE;
 					return FALSE;
 				}
@@ -838,6 +852,7 @@ private:
 				if (0 > status)
 				{
 					_bRead = FALSE;
+					PostMessageW(_hwnd, e_pdbcreate, _id, (LPARAM)status);
 					return FALSE;
 				}
 
@@ -935,6 +950,7 @@ private:
 			}
 			else
 			{
+				PostMessage(_hwnd, e_text, _id, (LPARAM)L"connecting...");
 				return ;
 			}
 		}
@@ -1023,6 +1039,7 @@ public:
 		{
 			if (bRedirected)
 			{
+				PostMessage(_hwnd, e_text, _id, (LPARAM)L"resolving host...");
 				DnsToIp((PCSTR)ZRingBuffer::GetBuffer() + _dwGetDataSize);
 				return;
 			}
@@ -1350,6 +1367,7 @@ ULONG CreateSingleDownload(SDP* params)
 			p->GetPdbforPE(params->DllFileName) : p->Init(params->PdbFileName, &params->Signature, params->Age))))
 		{
 			task->Register(p, 0);
+			PostMessage(task->get_HWND(), e_text, task->get_ID(), (LPARAM)L"connecting(0)...");
 			dwError = p->Connect(task->get_ip(), 0x5000);
 		}
 

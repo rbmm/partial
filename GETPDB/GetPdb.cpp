@@ -411,11 +411,27 @@ class CDialog : public ZDllVector
 			}
 			break;
 
+		case e_text:
+			SetWindowText(m_arr[wParam].hwndStatus, (PCWSTR)lParam);
+			break;
 		case e_connect:
-		case e_connect2:
 			if ((NTSTATUS)lParam)
 			{
-				swprintf(sz, L"connect(%u) error %x", uMsg - e_connect, (ULONG)lParam);
+				swprintf(sz, L"connect error %x", (ULONG)lParam);
+				SetWindowText(m_arr[wParam].hwndStatus, sz);
+				SetOverallProgress((NTSTATUS)lParam);
+			}
+			break;
+		case e_send:
+			{
+				swprintf(sz, L"send error %x", (ULONG)lParam);
+				SetWindowText(m_arr[wParam].hwndStatus, sz);
+				SetOverallProgress((NTSTATUS)lParam);
+			}
+			break;
+		case e_pdbcreate:
+			{
+				swprintf(sz, L"pdb create = %x", (ULONG)lParam);
 				SetWindowText(m_arr[wParam].hwndStatus, sz);
 				SetOverallProgress((NTSTATUS)lParam);
 			}

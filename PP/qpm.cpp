@@ -3,13 +3,12 @@
 _NT_BEGIN
 
 #include "qpm.h"
-#include "common.h"
+#define USER_SHARED_DATA ((PKUSER_SHARED_DATA)0x7ffe0000)
 #ifdef _WIN64
 
 #include "../wow/wow.h"
 
-PVOID g_LdrQueryProcessModuleInformationWow;
-PVOID g_RtlExitUserThreadWow;
+PVOID g_LdrQueryProcessModuleInformationWow, g_RtlExitUserThreadWow;
 
 BEGIN_WOW_DLL(ntdll)
 	WOW_FUNC(LdrQueryProcessModuleInformation)
@@ -172,7 +171,7 @@ QUERY_PROCESS_MODULES::~QUERY_PROCESS_MODULES()
 			ZwUnmapViewOfSection(NtCurrentProcess(), _psmi);
 			_psmi = 0;
 		}
-		ZwClose(_hSection);
+		NtClose(_hSection);
 	}
 
 	if (_psmi)
@@ -204,7 +203,6 @@ NTSTATUS QUERY_PROCESS_MODULES::create(PRTL_PROCESS_MODULES psmi)
 				Modules = psmi->Modules;
 				_Modules = _psmi->Modules;
 				_psmi->NumberOfModules = n;
-
 				do 
 				{
 					if (0 > (INT_PTR)Modules->ImageBase)
@@ -246,13 +244,13 @@ NTSTATUS QUERY_PROCESS_MODULES::create()
 			return 0;
 		}
 
-		ZwClose(hSection);
+		NtClose(hSection);
 	}
 
 	return status;
 }
 
-#define PROCESS_ALL_ACCESS_XP (SYNCHRONIZE | 0xFFF)
+NTSTATUS MyOpenProcess(PHANDLE ProcessHandle, ULONG DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes, PCLIENT_ID Cid);
 
 NTSTATUS QUERY_PROCESS_MODULES::query(HANDLE UniqueProcess)
 {
@@ -264,7 +262,7 @@ NTSTATUS QUERY_PROCESS_MODULES::query(HANDLE UniqueProcess)
 
 	RtlZeroMemory(_psmi, 2*secsize);
 
-	if (0 <= (status = NtOpenProcess(&hProcess, PROCESS_ALL_ACCESS_XP, &zoa, &cid)))
+	if (0 <= (status = MyOpenProcess(&hProcess, PROCESS_ALL_ACCESS_XP, &zoa, &cid)))
 	{
 		bool ExportSuppression = IsExportSuppressionEnabled(hProcess);
 

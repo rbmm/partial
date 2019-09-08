@@ -1,0 +1,23 @@
+/////////////////////////////////////////////////////////////////////////////
+//
+// RT_MANIFEST
+//
+LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
+
+1 RT_MANIFEST ".manifest"
+#if 0
+1 ICON "img/lock.ico"
+#else
+IDR_MENU1 ICON "img/flag.ico"
+
+ID_REFRESH BITMAP "img/refresh.1.bmp"
+ID_FIND BITMAP "img/mag.1.bmp"
+ID_GRID BITMAP "img/Fatcow-Farm-Fresh-Grid.1.bmp"
+ID_COPY BITMAP "img/copy.1.bmp"
+ID_PROTECTED BITMAP "img/lock.1.bmp"
+ID_POLICY BITMAP "img/s.1.bmp"
+ID_SESSIONS BITMAP "img/Hadezign-Devices-Monitor.1.bmp"
+ID_CMDLINE BITMAP "img/Run.1.bmp"
+#endif
+
+

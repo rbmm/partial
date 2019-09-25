@@ -72,7 +72,11 @@ VOID getWowProcs(PVOID ImageBase, PVOID BaseAddress, const EXPORT_ENTRY entry[])
 				}
 				else
 				{
-					o = AddressOfNameOrdinals[GetNameOrdinal(BaseAddress, AddressOfNames, NumberOfNames, Name)];
+					o = GetNameOrdinal(BaseAddress, AddressOfNames, NumberOfNames, Name);
+					if (o < NumberOfNames)
+					{
+						o = AddressOfNameOrdinals[o];
+					}
 				}
 
 				if (o >= NumberOfFunctions)

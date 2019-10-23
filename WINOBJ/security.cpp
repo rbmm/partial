@@ -332,7 +332,7 @@ NTSTATUS DumpACEList(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, ULONG AceCount, 
 			StringSid.Length = 0;
 			StringSid.Buffer = 0;
 		}
-		
+
 		switch (Use)
 		{
 		case SidTypeInvalid: 
@@ -470,6 +470,7 @@ void DumpToken(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, HANDLE hToken, BOOL bR
 		PTOKEN_APPCONTAINER_INFORMATION AppConainer;
 		PTOKEN_DEFAULT_DACL ptdd;
 		PTOKEN_PRIMARY_GROUP ptpg;
+		PTOKEN_SID_INFORMATION ptsi;
 	};
 
 	log(L"********************************************************************************\r\n");
@@ -624,6 +625,33 @@ void DumpToken(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, HANDLE hToken, BOOL bR
 		if (0 <= (status = NtQueryInformationToken(hToken, TokenIntegrityLevel, buf, cb, &rcb)))
 		{
 			DumpSid(log, PolicyHandle, L"IntegrityLevel:    ", ptml->Label.Sid);
+			break;
+		}
+
+	} while (status == STATUS_BUFFER_TOO_SMALL);
+
+	//////////////////////////////////////////////////////////////////////////
+	//
+	rcb = MAX_SID_SIZE;
+	do 
+	{
+		if (cb < rcb)
+		{
+			if (rcb > MAXUSHORT)
+			{
+				status = STATUS_UNSUCCESSFUL;
+				break;
+			}
+
+			cb = RtlPointerToOffset(buf = alloca(rcb - cb), stack);
+		}
+
+		if (0 <= (status = NtQueryInformationToken(hToken, TokenProcessTrustLevel, buf, cb, &rcb)))
+		{
+			if (ptsi->Sid)
+			{
+				DumpSid(log, PolicyHandle, L"TrustLevel:        ", ptsi->Sid);
+			}
 			break;
 		}
 
@@ -876,22 +904,28 @@ void DumpToken(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, HANDLE hToken, BOOL bR
 	}
 }
 
-void ShowSD(HANDLE hObject, PCWSTR caption, HWND hwndParent, HFONT hFont)
+void DumpToken(HWND hwnd, HANDLE hToken)
 {
-	if (HWND hwnd = CreateWindowExW(0, WC_EDIT, caption, WS_OVERLAPPEDWINDOW|WS_VSCROLL|ES_MULTILINE,
-		CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hwndParent, 0, 0, 0))
+	WLog log;
+	if (!log.Init(0x10000))
 	{
-		SendMessage(hwnd, WM_SETFONT, (WPARAM)hFont, 0);
+		LSA_LOOKUP ll;
 
-		WLog log;
-		if (!log.Init(0x10000))
-		{
-			LSA_LOOKUP ll;
-			DumpObjectSecurity(log, ll(), hObject);
-			SetWindowTextW(hwnd, log);
-		}
+		DumpToken(log, ll(), hToken, FALSE);
 
-		ShowWindow(hwnd, SW_SHOWNORMAL);
+		SetWindowTextW(hwnd, log);
+	}
+}
+
+void DumpObjectSecurity(HWND hwnd, HANDLE hObject)
+{
+	WLog log;
+	if (!log.Init(0x10000))
+	{
+		LSA_LOOKUP ll;
+		DumpObjectSecurity(log, ll(), hObject);
+
+		SetWindowTextW(hwnd, log);
 	}
 }
 

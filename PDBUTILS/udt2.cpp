@@ -19,7 +19,7 @@ BOOL IsUnnamedTag(PCSTR name)
 {
 	switch (*name++)
 	{
-	case '<': return !strcmp(name, "unnamed-tag>");
+	case '<': return !strcmp(name, "unnamed-tag>")|| !strcmp(name, "anonymous-tag>");
 	case '_': return !strcmp(name, "_unnamed");
 	}
 	return FALSE;

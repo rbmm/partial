@@ -4,7 +4,7 @@
 #include "stdafx.h"
 
 _NT_BEGIN
-
+#define AFX_IDW_STATUS_BAR 0xE801 
 #include "../inc/initterm.h"
 #include "../winZ/app.h"
 #include "../winz/Frame.h"

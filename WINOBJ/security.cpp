@@ -8,6 +8,17 @@ class WLog
 {
 	PVOID _BaseAddress;
 	ULONG _RegionSize, _Ptr;
+
+	PWSTR _buf()
+	{
+		return (PWSTR)((PBYTE)_BaseAddress + _Ptr);
+	}
+
+	ULONG _cch()
+	{
+		return (_RegionSize - _Ptr) / sizeof(WCHAR);
+	}
+
 public:
 	ULONG Init(SIZE_T RegionSize)
 	{
@@ -27,9 +38,8 @@ public:
 		}
 	}
 
-	WLog(WLog&) = delete;
 	WLog(WLog&&) = delete;
-
+	WLog(WLog&) = delete;
 	WLog(): _BaseAddress(0) {  }
 
 	operator PCWSTR()
@@ -42,24 +52,34 @@ public:
 		va_list args;
 		va_start(args, format);
 
-		int len = _vscwprintf(format, args);
+		int len = _vsnwprintf_s(_buf(), _cch(), _TRUNCATE, format, args);
 
 		if (0 < len)
 		{
-			ULONG Size = _Ptr + (len + 1) * sizeof(WCHAR);
-
-			if (Size <= _RegionSize)
-			{
-				len = _vsnwprintf_s((PWSTR)((PBYTE)_BaseAddress + _Ptr), 
-					(_RegionSize - _Ptr) / sizeof(WCHAR), _TRUNCATE, format, args);
-
-				if (0 < len)
-				{
-					_Ptr += len * sizeof(WCHAR);
-				}
-			}
+			_Ptr += len * sizeof(WCHAR);
 		}
 
+		va_end(args);
+
+		return *this;
+	}
+
+	WLog& operator[](HRESULT dwError)
+	{
+		LPCVOID lpSource = 0;
+		ULONG dwFlags = FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_IGNORE_INSERTS;
+
+		if (dwError & FACILITY_NT_BIT)
+		{
+			dwError &= ~FACILITY_NT_BIT;
+			dwFlags = FORMAT_MESSAGE_FROM_HMODULE|FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_IGNORE_INSERTS;
+
+			static HMODULE ghnt;
+			if (!ghnt && !(ghnt = GetModuleHandle(L"ntdll"))) return *this;
+			lpSource = ghnt;
+		}
+
+		FormatMessageW(dwFlags, lpSource, dwError, 0, _buf(), _cch(), 0);
 		return *this;
 	}
 };
@@ -234,6 +254,27 @@ NTSTATUS DumpGroups(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, PTOKEN_GROUPS ptg
 	return status;
 }
 
+PSID GetSidFromACE(PACE_HEADER ph)
+{
+	if ((ULONG)ph->AceType - ACCESS_MIN_MS_OBJECT_ACE_TYPE <= 
+		ACCESS_MAX_MS_OBJECT_ACE_TYPE - ACCESS_ALLOWED_OBJECT_ACE_TYPE)
+	{
+		switch (reinterpret_cast<PACCESS_ALLOWED_OBJECT_ACE>(ph)->Flags & (ACE_OBJECT_TYPE_PRESENT|ACE_INHERITED_OBJECT_TYPE_PRESENT))
+		{
+		case 0:
+			return &reinterpret_cast<PACCESS_ALLOWED_OBJECT_ACE>(ph)->ObjectType;
+		case ACE_OBJECT_TYPE_PRESENT:
+		case ACE_INHERITED_OBJECT_TYPE_PRESENT:
+			return &reinterpret_cast<PACCESS_ALLOWED_OBJECT_ACE>(ph)->InheritedObjectType;
+			//case ACE_OBJECT_TYPE_PRESENT|ACE_INHERITED_OBJECT_TYPE_PRESENT:
+		default:
+			return &reinterpret_cast<PACCESS_ALLOWED_OBJECT_ACE>(ph)->SidStart;
+		}
+	}
+
+	return &reinterpret_cast<PACCESS_ALLOWED_ACE>(ph)->SidStart;
+}
+
 NTSTATUS DumpACEList(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, ULONG AceCount, PVOID FirstAce)
 {
 	union {
@@ -251,7 +292,7 @@ NTSTATUS DumpACEList(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, ULONG AceCount, 
 
 	do 
 	{
-		if (RtlValidSid(Sid = &pah->SidStart))
+		if (RtlValidSid(Sid = GetSidFromACE(ph)))
 		{
 			*pSid++ = Sid;
 			SidCount++;
@@ -279,11 +320,11 @@ NTSTATUS DumpACEList(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, ULONG AceCount, 
 
 	char sz[16], sz2[16];
 
-	UNICODE_STRING StringSid;
+	UNICODE_STRING StringSid = {};
 
 	do
 	{
-		if (!RtlValidSid(Sid = &pah->SidStart))
+		if (!RtlValidSid(Sid = GetSidFromACE(ph)))
 		{
 			continue;
 		}
@@ -324,7 +365,7 @@ NTSTATUS DumpACEList(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, ULONG AceCount, 
 			sz2[3] = 0;
 			break;
 		default:
-			sprintf_s(sz, "%u", pah->Header.AceType);
+			sprintf_s(sz, "0x%x", pah->Header.AceType);
 		}
 
 		if (0 > RtlConvertSidToUnicodeString(&StringSid, Sid, TRUE))
@@ -917,15 +958,22 @@ void DumpToken(HWND hwnd, HANDLE hToken)
 	}
 }
 
-void DumpObjectSecurity(HWND hwnd, HANDLE hObject)
+void ShowSD(HANDLE hObject, PCWSTR caption, HWND hwndParent, HFONT hFont)
 {
-	WLog log;
-	if (!log.Init(0x10000))
+	if (HWND hwnd = CreateWindowExW(0, WC_EDIT, caption, WS_OVERLAPPEDWINDOW|WS_VSCROLL|ES_MULTILINE,
+		CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hwndParent, 0, 0, 0))
 	{
-		LSA_LOOKUP ll;
-		DumpObjectSecurity(log, ll(), hObject);
+		SendMessage(hwnd, WM_SETFONT, (WPARAM)hFont, 0);
 
-		SetWindowTextW(hwnd, log);
+		WLog log;
+		if (!log.Init(0x10000))
+		{
+			LSA_LOOKUP ll;
+			DumpObjectSecurity(log, ll(), hObject);
+			SetWindowTextW(hwnd, log);
+		}
+
+		ShowWindow(hwnd, SW_SHOWNORMAL);
 	}
 }
 

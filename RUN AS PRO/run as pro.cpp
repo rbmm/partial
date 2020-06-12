@@ -30,11 +30,12 @@ END_HOOK()
 
 #endif
 
-NTSTATUS DisplayStatus(NTSTATUS status, PCWSTR sztext)
+NTSTATUS DisplayStatus(NTSTATUS status, PCWSTR sztext, HWND hwnd = HWND_DESKTOP)
 {
 	WCHAR err[MAX_PATH];
 	
-	FormatNTStatus(err, status);
+	FormatMessage(FORMAT_MESSAGE_IGNORE_INSERTS|FORMAT_MESSAGE_FROM_HMODULE,
+		GetModuleHandleW(L"ntdll"), status, 0, err, RTL_NUMBER_OF(err), 0);
 	
 	ULONG mb;
 	
@@ -50,7 +51,7 @@ NTSTATUS DisplayStatus(NTSTATUS status, PCWSTR sztext)
 	default: __assume(false);
 	}
 	
-	MessageBoxW(0, err , sztext, mb);
+	MessageBoxW(hwnd, err , sztext, mb);
 	
 	return status;
 }
@@ -77,6 +78,9 @@ struct EEF : public EF
 	{
 	}
 };
+
+#define TRACE_FLAG	0x100
+#define RESUME_FLAG 0x10000
 
 LONG vex(::PEXCEPTION_POINTERS ExceptionInfo)
 {
@@ -114,23 +118,18 @@ LONG vex(::PEXCEPTION_POINTERS ExceptionInfo)
 #define BEGIN_PRIVILEGES(tp, n) static const struct {ULONG PrivilegeCount;LUID_AND_ATTRIBUTES Privileges[n];} tp = {n,{
 #define END_PRIVILEGES }};
 
-BOOL AdjustPrivileges()
-{
-	BOOL f = FALSE;
-	HANDLE hToken;
-	if (0 <= NtOpenProcessToken(NtCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hToken))
-	{
-		BEGIN_PRIVILEGES(tp, 2)
-			LAA(SE_DEBUG_PRIVILEGE),
-			LAA(SE_LOAD_DRIVER_PRIVILEGE)
-		END_PRIVILEGES	
-		f = (STATUS_SUCCESS == ZwAdjustPrivilegesToken(hToken, FALSE, (PTOKEN_PRIVILEGES)&tp, 0, 0, 0));
-		NtClose(hToken);
-	}
-	return f;
-}
+BEGIN_PRIVILEGES(tp_Load, 1)
+	LAA(SE_LOAD_DRIVER_PRIVILEGE)
+END_PRIVILEGES	
 
-NTSTATUS GetSystemToken(PBYTE buf, PHANDLE phSysToken)
+BEGIN_PRIVILEGES(tp_TCB_Assign_Debug_Quota, 4)
+	LAA(SE_TCB_PRIVILEGE),
+	LAA(SE_DEBUG_PRIVILEGE),
+	LAA(SE_INCREASE_QUOTA_PRIVILEGE),
+	LAA(SE_ASSIGNPRIMARYTOKEN_PRIVILEGE),
+END_PRIVILEGES	
+
+NTSTATUS GetSystemToken(PHANDLE phSysToken, PBYTE buf, PTOKEN_PRIVILEGES NewState = (PTOKEN_PRIVILEGES)&tp_TCB_Assign_Debug_Quota)
 {
 	NTSTATUS status;
 
@@ -195,14 +194,8 @@ NTSTATUS GetSystemToken(PBYTE buf, PHANDLE phSysToken)
 __v:
 			if (0 <= status)
 			{
-				BEGIN_PRIVILEGES(tp, 4)
-					LAA(SE_TCB_PRIVILEGE),
-					LAA(SE_DEBUG_PRIVILEGE),
-					LAA(SE_INCREASE_QUOTA_PRIVILEGE),
-					LAA(SE_ASSIGNPRIMARYTOKEN_PRIVILEGE),
-				END_PRIVILEGES	
 
-				if (STATUS_SUCCESS == NtAdjustPrivilegesToken(hNewToken, FALSE, (PTOKEN_PRIVILEGES)&tp, 0, 0, 0))	
+				if (STATUS_SUCCESS == NtAdjustPrivilegesToken(hNewToken, FALSE, NewState, 0, 0, 0))	
 				{
 					*phSysToken = hNewToken;
 					return STATUS_SUCCESS;
@@ -244,7 +237,7 @@ BOOL LoadDrv()
 	IO_STATUS_BLOCK iosb;
 	STATIC_OBJECT_ATTRIBUTES(oa, "\\device\\69766781178D422cA183775611A8EE55");
 
-	return 0 <= ZwOpenFile(&g_hDrv, SYNCHRONIZE, &oa, &iosb, FILE_SHARE_VALID_FLAGS, FILE_SYNCHRONOUS_IO_NONALERT);
+	return 0 <= NtOpenFile(&g_hDrv, SYNCHRONIZE, &oa, &iosb, FILE_SHARE_VALID_FLAGS, FILE_SYNCHRONOUS_IO_NONALERT);
 }
 
 NTSTATUS SetLowLevel(HANDLE hToken)
@@ -617,7 +610,7 @@ INT_PTR CALLBACK CMyApp::DialogProc_(HWND hwnd, UINT message, WPARAM wParam, LPA
 	CMyApp* me = 0;
 	
 	if (message == WM_INITDIALOG) {
-		SetWindowLongPtr(hwnd, DWLP_USER, (LONG)lParam);
+		SetWindowLongPtr(hwnd, DWLP_USER, (LONG_PTR)lParam);
 		me = (CMyApp*)lParam;
 		SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)LoadImage((HINSTANCE)&__ImageBase, 
 			MAKEINTRESOURCE(IDI_ICON1), IMAGE_ICON, 32, 32, LR_SHARED));
@@ -828,9 +821,7 @@ INT_PTR CMyApp::DialogProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam
 		case MAKEWPARAM(IDC_BUTTON2, BN_CLICKED):
 			status = OnRun(hwnd);
 			if (0 > status) {
-				WCHAR sz[MAX_PATH];
-				FormatNTStatus(sz, status);
-				MessageBoxW(hwnd, sz, L"CreateProcess", MB_ICONERROR);//
+				DisplayStatus(status, L"CreateProcess", hwnd);//
 			}
 			break;
 		case MAKEWPARAM(IDC_BUTTON1, BN_CLICKED):
@@ -890,13 +881,13 @@ int CMyApp::OnDropDownPro(HWND hwndCtl, BOOLEAN bImersonate )
 	{
 		status = STATUS_INSUFFICIENT_RESOURCES;
 
-		if (PBYTE buf = new BYTE[cb])
+		if (PBYTE buf = new BYTE[cb += 0x1000])
 		{
-			if (0 <= (status = ZwQuerySystemInformation(SystemProcessInformation, buf, cb, &cb)))
+			if (0 <= (status = NtQuerySystemInformation(SystemProcessInformation, buf, cb, &cb)))
 			{
 				if (bImersonate)
 				{
-					if (0 > GetSystemToken(buf, &_hSysToken))
+					if (0 > GetSystemToken(&_hSysToken, buf))
 					{
 						MessageBox(0, L"GetSystemToken", 0, MB_ICONERROR);
 					}
@@ -1346,6 +1337,35 @@ extern "C"
 }
 #endif
 
+NTSTATUS GetLoadDrvToken(PHANDLE phToken)
+{
+	NTSTATUS status;
+
+	ULONG cb = 0x10000;
+
+	do 
+	{
+		status = STATUS_INSUFFICIENT_RESOURCES;
+
+		if (PBYTE buf = new BYTE[cb += 0x1000])
+		{
+			if (0 <= (status = NtQuerySystemInformation(SystemProcessInformation, buf, cb, &cb)))
+			{
+				status = GetSystemToken(phToken, buf, (PTOKEN_PRIVILEGES)&tp_Load);
+
+				if (status == STATUS_INFO_LENGTH_MISMATCH)
+				{
+					status = STATUS_UNSUCCESSFUL;
+				}
+			}
+
+			delete [] buf;
+		}
+
+	} while(status == STATUS_INFO_LENGTH_MISMATCH);
+
+	return status;
+}
 void ep(PVOID wow)
 {	
 #ifndef _WIN64
@@ -1358,24 +1378,35 @@ void ep(PVOID wow)
 	getWowProcs();
 #endif
 
-	if (AdjustPrivileges()) 
+	BOOLEAN b;
+	RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, TRUE, FALSE, &b);
+	
+	if (0 > RtlAdjustPrivilege(SE_LOAD_DRIVER_PRIVILEGE, TRUE, FALSE, &b))
 	{
-		ULONG v;
-		RtlGetNtVersionNumbers(&v, 0, 0);
-		if (g_xp = (v < 6))//_WIN32_WINNT_VISTA;
+		HANDLE hToken;
+		if (0 <= GetLoadDrvToken(&hToken))
 		{
-			if (!RtlAddVectoredExceptionHandler(TRUE, vex))
-			{
-				ExitProcess(0);
-			}
+			AutoImpesonate a(hToken);
+			NtClose(hToken);
+			LoadDrv();
 		}
-		LoadDrv();
-		CMyApp theApp;
 	}
 	else
 	{
-		MessageBoxW(0, L"RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE|SE_LOAD_DRIVER_PRIVILEGE)", 0, MB_ICONERROR);
+		LoadDrv();
 	}
+
+	ULONG v;
+	RtlGetNtVersionNumbers(&v, 0, 0);
+	if (g_xp = (v < 6))//_WIN32_WINNT_VISTA;
+	{
+		if (!RtlAddVectoredExceptionHandler(TRUE, vex))
+		{
+			ExitProcess(0);
+		}
+	}
+	
+	{ CMyApp theApp; }
 	
 	ExitProcess(0);
 }

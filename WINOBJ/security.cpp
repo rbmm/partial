@@ -164,7 +164,7 @@ NTSTATUS DumpGroups(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, PTOKEN_GROUPS ptg
 	NTSTATUS status = PolicyHandle ? 
 		LsaLookupSids(PolicyHandle, GroupCount, Sids, &ReferencedDomains, &Names) : STATUS_INVALID_HANDLE;
 
-	if (0 <= status)
+	if (ReferencedDomains)
 	{
 		Entries = ReferencedDomains->Entries;
 		Domains = ReferencedDomains->Domains;
@@ -186,7 +186,7 @@ NTSTATUS DumpGroups(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, PTOKEN_GROUPS ptg
 		PCUNICODE_STRING Domain = &emptyUS;
 		SID_NAME_USE Use = SidTypeUnknown;
 
-		if (0 <= status)
+		if (Names)
 		{
 			ULONG DomainIndex = Names->DomainIndex;
 
@@ -245,11 +245,8 @@ NTSTATUS DumpGroups(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, PTOKEN_GROUPS ptg
 
 	} while (Groups++, --GroupCount);
 
-	if (0 <= status)
-	{
-		LsaFreeMemory(ReferencedDomains);
-		LsaFreeMemory(bufNames);
-	}
+	if (ReferencedDomains) LsaFreeMemory(ReferencedDomains);
+	if (bufNames) LsaFreeMemory(bufNames);
 
 	return status;
 }
@@ -311,7 +308,7 @@ NTSTATUS DumpACEList(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, ULONG AceCount, 
 	NTSTATUS status = PolicyHandle ? 
 		LsaLookupSids (PolicyHandle, SidCount, Sids, &ReferencedDomains, &Names) : STATUS_INVALID_HANDLE;
 
-	if (0 <= status)
+	if (ReferencedDomains)
 	{
 		Entries = ReferencedDomains->Entries;
 		Domains = ReferencedDomains->Domains;
@@ -333,7 +330,7 @@ NTSTATUS DumpACEList(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, ULONG AceCount, 
 		PCUNICODE_STRING Domain = &emptyUS;
 		SID_NAME_USE Use = SidTypeUnknown;
 
-		if (0 <= status)
+		if (Names)
 		{
 			ULONG DomainIndex = Names->DomainIndex;
 
@@ -390,11 +387,8 @@ NTSTATUS DumpACEList(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, ULONG AceCount, 
 
 	} while (pb += ph->AceSize, --AceCount);
 
-	if (0 <= status)
-	{
-		LsaFreeMemory(ReferencedDomains);
-		LsaFreeMemory(bufNames);
-	}
+	if (ReferencedDomains) LsaFreeMemory(ReferencedDomains);
+	if (bufNames) LsaFreeMemory(bufNames);
 
 	return status;
 }

@@ -3,8 +3,31 @@
 
 _TEXT segment public 'CODE'
 
-@strnstr@16 proc
-	jecxz @@3
+@retz4 proc
+	xor eax,eax
+	ret 4
+@retz4 endp
+
+?strnchr@NT@@YIPADKPBXD@Z proc
+	jecxz @retz4
+	mov al,[esp + 4]
+	xchg edi,edx
+	repne scasb
+	mov eax,edi
+	cmovne eax,ecx
+	mov edi,edx
+	ret 4
+?strnchr@NT@@YIPADKPBXD@Z endp
+
+@retz8 proc
+	xor eax,eax
+	ret 8
+@retz8 endp
+
+?strnstr@NT@@YIPADKPBXK0@Z proc
+	jecxz @retz8
+	cmp ecx,[esp + 4]
+	jb @retz8
 	push edi
 	push esi
 	push ebx
@@ -15,52 +38,29 @@ _TEXT segment public 'CODE'
 	mov al,[ebp]
 	inc ebp
 	dec ebx
+	sub ecx,ebx
 @@1:
 	repne scasb
 	jne @@2
-	cmp ecx,ebx
-	jb @@2
 	mov esi,ebp
 	mov edx,edi
 	push ecx
 	mov ecx,ebx
+	test ecx,ecx
 	repe cmpsb
 	pop ecx
 	je @@2
 	mov edi,edx
 	jmp @@1
 @@2:
-	sete al
-	movzx eax,al
-	neg eax
-	and eax,edi
+	mov eax,edi
+	cmovne eax,ecx
 	pop ebp
 	pop ebx
 	pop esi
 	pop edi
 	ret 8
-@@3:
-	xor eax,eax
-	ret 8
-@strnstr@16 endp
-
-@strnchr@12 proc
-	jecxz @@1
-	mov al,[esp + 4]
-	push edi
-	mov edi,edx
-	repne scasb
-	sete al
-	movzx eax,al
-	neg eax
-	and eax,edi	
-	pop edi
-	ret 4
-@@1:
-	xor eax,eax
-	ret 4
-@strnchr@12 endp
-
+?strnstr@NT@@YIPADKPBXK0@Z endp
 
 _TEXT ends
 

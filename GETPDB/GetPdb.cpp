@@ -19,6 +19,12 @@ BOOL IsValidPDBExist(POBJECT_ATTRIBUTES poa, PGUID Signature, DWORD Age);
 HANDLE g_hDrv;
 
 #include "../tkn/tkn.h"
+#define FormatStatus(err, module, status) FormatMessage(\
+	FORMAT_MESSAGE_IGNORE_INSERTS|FORMAT_MESSAGE_FROM_HMODULE,\
+	GetModuleHandleW(L ## # module),status, 0, err, RTL_NUMBER_OF(err), 0)
+
+#define FormatWin32Status(err, status) FormatStatus(err, kernel32.dll, status)
+#define FormatNTStatus(err, status) FormatStatus(err, ntdll.dll, status)
 
 NTSTATUS DoIoControl(ULONG code)
 {
@@ -62,10 +68,10 @@ NTSTATUS OpenFolderIf(PHANDLE phFile, PCWSTR sz, PCWSTR path)
 			{
 				if (hFile)
 				{
-					ZwClose(hFile);
+					NtClose(hFile);
 				}
 
-				if (0 > (status = ZwCreateFile(&hFile, FILE_ADD_SUBDIRECTORY|SYNCHRONIZE, &oa, &iosb, 0, 
+				if (0 > (status = NtCreateFile(&hFile, FILE_ADD_SUBDIRECTORY|SYNCHRONIZE, &oa, &iosb, 0, 
 					0, FILE_SHARE_VALID_FLAGS, FILE_OPEN_IF, FILE_DIRECTORY_FILE, 0, 0)))
 				{
 					return status;
@@ -96,6 +102,12 @@ public:
 	}
 };
 
+#ifdef _WIN64
+#define CD_MAGIC 0x8e3420ad9691DAE6
+#else
+#define CD_MAGIC 0x9691DAE6
+#endif
+
 class CDialog : public ZDllVector
 {
 	enum { e_LogSize = 0x8000 };
@@ -105,12 +117,12 @@ class CDialog : public ZDllVector
 	} m_arr[9];
 	LONG m_nv[8];
 
-	HWND m_hwnd;
+	HWND m_hwnd, m_hwndCD;
 	HANDLE m_hRoot;
 	PSTR m_szLog;
 	HFONT m_hFont;
 	LONG m_dwRef, m_dx;
-	ULONG m_nProcessed, m_nOk, m_nFail, m_nExist, m_cbFree;
+	ULONG m_nProcessed, m_nOk, m_nFail, m_nExist, m_cbFree, m_crc;
 	BOOLEAN m_bDirChanged, m_DownloadActive, m_bAll, m_bTimerActive;
 
 	//---------------------------------------------------------
@@ -147,7 +159,7 @@ class CDialog : public ZDllVector
 
 		OnTimer(hwnd);
 
-		m_hwnd = hwnd;
+		m_hwnd = hwnd, m_hwndCD = 0, m_crc = 0;
 
 		m_bTimerActive = SetTimer(hwnd, 1, 5000, 0) != 0;
 
@@ -260,7 +272,7 @@ class CDialog : public ZDllVector
 
 				if (m_hRoot)
 				{
-					ZwClose(m_hRoot);
+					NtClose(m_hRoot);
 					m_hRoot = 0;
 				}
 
@@ -272,6 +284,7 @@ class CDialog : public ZDllVector
 				}
 				else
 				{
+					m_crc = RtlComputeCrc32(0, _wcsupr(path), ((ULONG)wcslen(path)-1)*sizeof(WCHAR));
 					m_bDirChanged = FALSE;
 					return TRUE;
 				}
@@ -409,6 +422,7 @@ class CDialog : public ZDllVector
 					ShowWindow(hwnd, SW_SHOW);
 				}
 			}
+			m_nOk = 0, m_nFail = 0;
 			break;
 
 		case e_text:
@@ -423,25 +437,28 @@ class CDialog : public ZDllVector
 			}
 			break;
 		case e_send:
-			{
-				swprintf(sz, L"send error %x", (ULONG)lParam);
-				SetWindowText(m_arr[wParam].hwndStatus, sz);
-				SetOverallProgress((NTSTATUS)lParam);
-			}
+			swprintf(sz, L"send error %x", (ULONG)lParam);
+			SetWindowText(m_arr[wParam].hwndStatus, sz);
+			SetOverallProgress((NTSTATUS)lParam);
 			break;
 		case e_pdbcreate:
-			{
-				swprintf(sz, L"pdb create = %x", (ULONG)lParam);
-				SetWindowText(m_arr[wParam].hwndStatus, sz);
-				SetOverallProgress((NTSTATUS)lParam);
-			}
+			swprintf(sz, L"pdb create = %x", (ULONG)lParam);
+			SetWindowText(m_arr[wParam].hwndStatus, sz);
+			SetOverallProgress((NTSTATUS)lParam);
 			break;
 
 		case e_disconnect:
 			if (lParam)
 			{
 				SetOverallProgress(0);
-				if (!m_bAll) SetWindowText(m_arr[wParam].hwndStatus, L"OK");
+				if (!m_bAll) 
+				{
+					SetWindowText(m_arr[wParam].hwndStatus, L"OK");
+					if (m_hwndCD)
+					{
+						PostMessageW(m_hwndCD, WM_COMMAND, IDOK, 0);
+					}
+				}
 			}
 			else
 			{
@@ -495,7 +512,7 @@ class CDialog : public ZDllVector
 			break;
 
 		case WM_CLOSE:
-			if (!m_DownloadActive)
+			if (!m_DownloadActive && !m_hwndCD)
 			{
 				EndDialog(hwnd, 0);
 			}
@@ -509,6 +526,45 @@ class CDialog : public ZDllVector
 			SetWindowLongPtr(hwnd, DWLP_USER, lParam);
 			((CDialog*)lParam)->OnInitDialog(hwnd);
 			break;
+
+		case WM_COPYDATA:
+			if (reinterpret_cast<COPYDATASTRUCT*>(lParam)->dwData == CD_MAGIC)
+			{
+				m_hwndCD = 0;
+
+				ULONG cb = reinterpret_cast<COPYDATASTRUCT*>(lParam)->cbData;
+				if (cb && !(cb & 1))
+				{
+					if (PWSTR psz = (PWSTR)reinterpret_cast<COPYDATASTRUCT*>(lParam)->lpData)
+					{
+						PWSTR end = (PWSTR)RtlOffsetToPointer(psz, cb - sizeof(WCHAR));
+						if (!*end)
+						{
+							len = (ULONG)wcslen(psz);
+							if (len - 1 < MAXSHORT)
+							{
+								PWSTR name = psz + len + 1;
+								if (name < end)
+								{
+									SetDlgItemTextW(hwnd, IDC_EDIT1, name--);
+									SetDlgItemTextW(hwnd, IDC_EDIT2, psz);
+									if (*--name == '\\')
+									{
+										*name = 0;
+									}
+									
+									m_bDirChanged = (RtlComputeCrc32(0, _wcsupr(psz), (ULONG)wcslen(psz)*sizeof(WCHAR)) != m_crc);
+									m_hwndCD = (HWND)wParam;
+
+									SetWindowLongPtr(hwnd, DWLP_MSGRESULT, CD_MAGIC);
+									return TRUE;
+								}
+							}
+						}
+					}
+				}
+			}
+			return 0;
 
 		case WM_COMMAND:
 			switch(wParam)
@@ -539,6 +595,7 @@ class CDialog : public ZDllVector
 				break;
 
 			case IDOK:
+				m_nOk = 0, m_nFail = 0;
 				if (m_bDirChanged && !OpenFolder(hwnd, GetDlgItem(hwnd, IDC_EDIT2)))
 				{
 					return 0;

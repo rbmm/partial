@@ -19,18 +19,15 @@ strnlen endp
 
 strnchr proc
 	jrcxz @@1
-	push rdi
-	mov al,r8b
-	mov rdi,rdx
+	mov rax,r8
+	xchg rdi,rdx
 	repne scasb
-	sete al
-	movzx rax,al
-	neg rax
-	and rax,rdi
-	pop rdi
+	mov rax,rdi
+	mov rdi,rdx
+	cmovne rax,rcx
 	ret
 @@1:
-	xor rax,rax
+	xor eax,eax
 	ret
 strnchr endp
 

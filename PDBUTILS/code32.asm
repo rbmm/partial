@@ -21,14 +21,11 @@ _TEXT segment public 'CODE'
 @strnchr@12 proc
 	jecxz @@1
 	mov al,[esp + 4]
-	push edi
-	mov edi,edx
+	xchg edi,edx
 	repne scasb
-	sete al
-	movzx eax,al
-	neg eax
-	and eax,edi	
-	pop edi
+	mov eax,edi
+	cmovne eax,ecx
+	mov edi,edx
 	ret 4
 @@1:
 	xor eax,eax

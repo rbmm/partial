@@ -615,7 +615,7 @@ private:
 		return _bSSL ? 0 : (*ppSendBuffer = ZRingBuffer::GetBuffer(), _dwGetDataSize);
 	}
 
-	virtual BOOL OnEndHandshake()
+	virtual SECURITY_STATUS OnEndHandshake()
 	{
 		DbgPrint("%s<%p>\n", __FUNCTION__, this);
 		PostMessage(_hwnd, e_text, _id, (LPARAM)L"EndHandshake");
@@ -627,9 +627,9 @@ private:
 		if (ULONG dwError = SendUserData(ZRingBuffer::GetBuffer(), _dwGetDataSize))
 		{
 			PostMessage(_hwnd, e_send, _id, (LPARAM)dwError);
-			return FALSE;
+			return HRESULT_FROM_WIN32(dwError);
 		}
-		return TRUE;
+		return SEC_E_OK;
 	}
 
 	// return size of headers

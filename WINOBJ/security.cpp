@@ -79,7 +79,10 @@ public:
 			lpSource = ghnt;
 		}
 
-		FormatMessageW(dwFlags, lpSource, dwError, 0, _buf(), _cch(), 0);
+		if (dwFlags = FormatMessageW(dwFlags, lpSource, dwError, 0, _buf(), _cch(), 0))
+		{
+			_Ptr += dwFlags * sizeof(WCHAR);
+		}
 		return *this;
 	}
 };

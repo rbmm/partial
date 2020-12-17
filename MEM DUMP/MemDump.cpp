@@ -86,6 +86,145 @@ NTSTATUS MyOpenProcess(PHANDLE ProcessHandle, ULONG DesiredAccess, POBJECT_ATTRI
 	return ZwOpenProcess(ProcessHandle, DesiredAccess, ObjectAttributes, Cid);
 }
 
+NTSTATUS
+GetProcessMitigationPolicy(
+						   _In_ HANDLE hProcess,
+						   _In_ PROCESS_MITIGATION_POLICY MitigationPolicy,
+						   _Out_writes_bytes_(ULONG) PVOID lpBuffer
+						   )
+{
+	struct PROCESS_MITIGATION {
+		PROCESS_MITIGATION_POLICY Policy;
+		ULONG Flags;
+	};
+
+	PROCESS_MITIGATION m = { MitigationPolicy };
+	NTSTATUS status = NtQueryInformationProcess(hProcess, ProcessMitigationPolicy, &m, sizeof(m), 0);
+	if (0 <= status)
+	{
+		*(PULONG)lpBuffer = m.Flags;
+		return STATUS_SUCCESS;
+	}
+
+	return status;
+}
+
+bool IsExportSuppressionEnabled(HANDLE hProcess)
+{
+	PROCESS_MITIGATION_CONTROL_FLOW_GUARD_POLICY cfg;
+
+	return 0 <= GetProcessMitigationPolicy(hProcess, ProcessControlFlowGuardPolicy, &cfg) &&
+		cfg.EnableControlFlowGuard && cfg.EnableExportSuppression;
+}
+
+BOOL WINAPI SetProcessValidCallTargetsTemp(
+	_In_ HANDLE hProcess,
+	_In_ PVOID VirtualAddress,
+	_In_ SIZE_T RegionSize,
+	_In_ ULONG NumberOfOffsets,
+	_Inout_updates_(NumberOfOffsets) PCFG_CALL_TARGET_INFO OffsetInformation
+	);
+
+BOOL WINAPI SetProcessValidCallTargetsNotImpl(
+	_In_ HANDLE /*hProcess*/,
+	_In_ PVOID /*VirtualAddress*/,
+	_In_ SIZE_T /*RegionSize*/,
+	_In_ ULONG /*NumberOfOffsets*/,
+	_Inout_updates_(NumberOfOffsets) PCFG_CALL_TARGET_INFO /*OffsetInformation*/
+	)
+{
+	RtlNtStatusToDosError(STATUS_NOT_IMPLEMENTED);
+	return FALSE;
+}
+
+EXTERN_C {
+	extern PVOID __imp_SetProcessValidCallTargets;
+}
+
+#ifdef _X86_
+#pragma comment(linker, "/alternatename:___imp_SetProcessValidCallTargets=__imp__SetProcessValidCallTargets@20")
+#endif
+
+//#define _PRINT_CPP_NAMES_
+#include "../inc/asmfunc.h"
+
+BOOL WINAPI SetProcessValidCallTargetsTemp(
+	_In_ HANDLE hProcess,
+	_In_ PVOID VirtualAddress,
+	_In_ SIZE_T RegionSize,
+	_In_ ULONG NumberOfOffsets,
+	_Inout_updates_(NumberOfOffsets) PCFG_CALL_TARGET_INFO OffsetInformation
+	)
+{
+	CPP_FUNCTION;
+	__imp_SetProcessValidCallTargets = GetProcAddress(GetModuleHandle(L"Kernelbase"), "SetProcessValidCallTargets");
+	return SetProcessValidCallTargets(hProcess, VirtualAddress, RegionSize, NumberOfOffsets, OffsetInformation);
+}
+
+NTSTATUS SetExportValid(HANDLE hProcess, LPCVOID pv)
+{
+	MEMORY_BASIC_INFORMATION mbi;
+
+	NTSTATUS status = NtQueryVirtualMemory(hProcess, (void*)pv, MemoryBasicInformation, &mbi, sizeof(mbi), 0);
+
+	if (0 <= status)
+	{
+		if (mbi.State != MEM_COMMIT || mbi.Type != MEM_IMAGE)
+		{
+			return STATUS_INVALID_ADDRESS;
+		}
+
+		CFG_CALL_TARGET_INFO OffsetInformation = {
+			(ULONG_PTR)pv - (ULONG_PTR)mbi.BaseAddress,
+			CFG_CALL_TARGET_CONVERT_EXPORT_SUPPRESSED_TO_VALID | CFG_CALL_TARGET_VALID
+		};
+
+		return SetProcessValidCallTargets(hProcess, mbi.BaseAddress, mbi.RegionSize, 1, &OffsetInformation) &&
+			(OffsetInformation.Flags & CFG_CALL_TARGET_PROCESSED) ? STATUS_SUCCESS : STATUS_STRICT_CFG_VIOLATION;
+	}
+
+	return status;
+}
+
+NTSTATUS SetExportValid(HANDLE hProcess, LPCVOID pv1, LPCVOID pv2)
+{
+	MEMORY_BASIC_INFORMATION mbi;
+
+	NTSTATUS status;
+
+	if (0 <= (status = NtQueryVirtualMemory(hProcess, (void*)pv1, MemoryBasicInformation, &mbi, sizeof(mbi), 0)))
+	{
+		if (mbi.State != MEM_COMMIT || mbi.Type != MEM_IMAGE)
+		{
+			return STATUS_INVALID_ADDRESS;
+		}
+
+		CFG_CALL_TARGET_INFO OffsetInformation[] = {
+			{ (ULONG_PTR)pv1 - (ULONG_PTR)mbi.BaseAddress,
+			CFG_CALL_TARGET_CONVERT_EXPORT_SUPPRESSED_TO_VALID | CFG_CALL_TARGET_VALID},
+			{ (ULONG_PTR)pv2 - (ULONG_PTR)mbi.BaseAddress,
+			CFG_CALL_TARGET_CONVERT_EXPORT_SUPPRESSED_TO_VALID | CFG_CALL_TARGET_VALID},
+		};
+
+		if ((ULONG_PTR)pv2 - (ULONG_PTR)mbi.BaseAddress < mbi.RegionSize)
+		{
+			return SetProcessValidCallTargets(hProcess, mbi.BaseAddress, mbi.RegionSize, 2, OffsetInformation) &&
+				(OffsetInformation[0].Flags & CFG_CALL_TARGET_PROCESSED) &&
+				(OffsetInformation[1].Flags & CFG_CALL_TARGET_PROCESSED)? STATUS_SUCCESS : STATUS_STRICT_CFG_VIOLATION;
+		}
+
+		if (!SetProcessValidCallTargets(hProcess, mbi.BaseAddress, mbi.RegionSize, 1, OffsetInformation) ||
+			!(OffsetInformation[0].Flags & CFG_CALL_TARGET_PROCESSED))
+		{
+			return STATUS_STRICT_CFG_VIOLATION;
+		}
+
+		return SetExportValid(hProcess, pv2);
+	}
+
+	return status;
+}
+
 class QUERY_PROCESS_MODULES
 {
 	enum { secsize = 0x20000 };
@@ -168,46 +307,63 @@ NTSTATUS QUERY_PROCESS_MODULES::_query(HANDLE UniqueProcess)
 
 	NTSTATUS status;
 
+	RtlZeroMemory(_psmi, 2*secsize);
+
 	if (0 <= (status = MyOpenProcess(&hProcess, PROCESS_ALL_ACCESS_XP, &zoa, &cid)))
 	{
+		bool ExportSuppression = IsExportSuppressionEnabled(hProcess);
+
 		PVOID RemoteBaseAddress = 0;
 		SIZE_T ViewSize = 0;
 		static LARGE_INTEGER timeout = { (ULONG)-20000000, -1};// 2 sec
 
 		if (0 <= (status = ZwMapViewOfSection(_hSection, hProcess, &RemoteBaseAddress, 0, 0, 0, &ViewSize, ViewUnmap, 0, PAGE_READWRITE)))
 		{
-			PULONG psize = (PULONG)RtlOffsetToPointer(RemoteBaseAddress, secsize - sizeof(ULONG));
-
-			if (0 <= (status = RtlCreateUserThread(hProcess, 0, TRUE, 0, 0, 0, RtlExitUserThread, 0, &hThread, 0)))
+			if (!ExportSuppression || (0 <= (status = SetExportValid(hProcess, LdrQueryProcessModuleInformation, RtlExitUserThread))))
 			{
-				status = ZwQueueApcThread(hThread, (PKNORMAL_ROUTINE)LdrQueryProcessModuleInformation, RemoteBaseAddress, (PVOID)(secsize - sizeof(ULONG)), psize);
-				ZwSetInformationThread(hThread, ThreadHideFromDebugger, 0, 0);
-				ZwResumeThread(hThread, 0);
-				if ((status = ZwWaitForSingleObject(hThread, FALSE, &timeout)) == STATUS_TIMEOUT)
+				if (0 <= (status = RtlCreateUserThread(hProcess, 0, TRUE, 0, 0, 0, RtlExitUserThread, 0, &hThread, 0)))
 				{
-					ZwTerminateThread(hThread, STATUS_ABANDONED);
+					ZwQueueApcThread(hThread, (PKNORMAL_ROUTINE)LdrQueryProcessModuleInformation, 
+						RemoteBaseAddress, 
+						(PVOID)(secsize - sizeof(ULONG)), 
+						(PBYTE)RemoteBaseAddress + secsize - sizeof(ULONG));
+
+					ZwSetInformationThread(hThread, ThreadHideFromDebugger, 0, 0);
+
+					ZwResumeThread(hThread, 0);
+
+					if ((status = ZwWaitForSingleObject(hThread, FALSE, &timeout)) == STATUS_TIMEOUT)
+					{
+						ZwTerminateThread(hThread, STATUS_ABANDONED);
+					}
+
+					NtClose(hThread);
 				}
-				ZwClose(hThread);
 			}
+
 #ifdef _WIN64
 			PVOID wow;
 
 			if (
 				0 <= status && status != STATUS_TIMEOUT &&
 				0 <= ZwQueryInformationProcess(hProcess, ProcessWow64Information, &wow, sizeof(wow), 0) && wow &&
-				g_LdrQueryProcessModuleInformationWow && g_RtlExitUserThreadWow
+				g_LdrQueryProcessModuleInformationWow && g_RtlExitUserThreadWow &&
+				(!ExportSuppression || (0 <= SetExportValid(hProcess, g_LdrQueryProcessModuleInformationWow, g_RtlExitUserThreadWow)))
 				)
 			{
-				if (0 <= RtlCreateUserThread(hProcess, 0, TRUE, 0, 0, 0, g_RtlExitUserThreadWow, 0, &hThread, 0))
+				if (0 <= RtlCreateUserThread(hProcess, 0, TRUE, 0, 0, 0, (void*)g_RtlExitUserThreadWow, 0, &hThread, 0))
 				{
-					RtlQueueApcWow64Thread(hThread, (PKNORMAL_ROUTINE)g_LdrQueryProcessModuleInformationWow, RtlOffsetToPointer(RemoteBaseAddress, secsize), (PVOID)(secsize - sizeof(ULONG)), psize);
+					RtlQueueApcWow64Thread(hThread, (PKNORMAL_ROUTINE)g_LdrQueryProcessModuleInformationWow, 
+						RtlOffsetToPointer(RemoteBaseAddress, secsize), 
+						(PVOID)(secsize - sizeof(ULONG)), 
+						(PBYTE)RemoteBaseAddress + 2*secsize - sizeof(ULONG));
 					ZwSetInformationThread(hThread, ThreadHideFromDebugger, 0, 0);
 					ZwResumeThread(hThread, 0);
 					if ((status = ZwWaitForSingleObject(hThread, FALSE, &timeout)) == STATUS_TIMEOUT)
 					{
 						ZwTerminateThread(hThread, STATUS_ABANDONED);
 					}
-					ZwClose(hThread);
+					NtClose(hThread);
 				}
 
 				if (0 <= status && status != STATUS_TIMEOUT)
@@ -220,9 +376,9 @@ NTSTATUS QUERY_PROCESS_MODULES::_query(HANDLE UniqueProcess)
 						{
 							PRTL_PROCESS_MODULE_INFORMATION32 Modules = psmi->Modules + 1;
 
-							PRTL_PROCESS_MODULES psmi = _psmi;
-							PRTL_PROCESS_MODULE_INFORMATION _Modules = psmi->Modules + psmi->NumberOfModules;
-							psmi->NumberOfModules += NumberOfModules;
+							PRTL_PROCESS_MODULES psmi0 = _psmi;
+							PRTL_PROCESS_MODULE_INFORMATION _Modules = psmi0->Modules + psmi0->NumberOfModules;
+							psmi0->NumberOfModules += NumberOfModules;
 
 							do 
 							{
@@ -240,12 +396,13 @@ NTSTATUS QUERY_PROCESS_MODULES::_query(HANDLE UniqueProcess)
 						}
 					}
 				}
+
 			}
 #endif
 			ZwUnmapViewOfSection(hProcess, RemoteBaseAddress);
 		}
 
-		ZwClose(hProcess);
+		NtClose(hProcess);
 	}
 
 	return status;
@@ -293,68 +450,75 @@ void OnDropdownComboDlls(HWND hwndDlg, HWND hwndCtl, HANDLE dwProcessId, QUERY_P
 	{
 		PRTL_PROCESS_MODULES psmi = pqpm->get();
 
-		int Num = psmi->NumberOfModules;
-		PRTL_PROCESS_MODULE_INFORMATION csmi = psmi->Modules;
-
-		int ksort = 3, i;
-		do ; while(ksort && (IsDlgButtonChecked(hwndDlg, IDC_RADIO1 + --ksort) != BST_CHECKED));
-
-		PRTL_PROCESS_MODULE_INFORMATION* arr = (PRTL_PROCESS_MODULE_INFORMATION*)alloca(Num * sizeof PVOID);
-
-		i = Num - 1; 
-
-		do arr[i] = csmi + i; while (i--);
-
-		if (ksort < 2) 
+		if (int Num = psmi->NumberOfModules)
 		{
-			SORTMODE rf;
-			rf.mode = -ksort;
+			PRTL_PROCESS_MODULE_INFORMATION csmi = psmi->Modules;
 
-			qsort(arr, Num, sizeof(PVOID), (int (__cdecl *)(const void *, const void *))KModCompare);
+			int ksort = 3, i;
+			do ; while(ksort && (IsDlgButtonChecked(hwndDlg, IDC_RADIO1 + --ksort) != BST_CHECKED));
+
+			PRTL_PROCESS_MODULE_INFORMATION* arr = (PRTL_PROCESS_MODULE_INFORMATION*)alloca(Num * sizeof PVOID);
+
+			i = Num - 1; 
+
+			do arr[i] = csmi + i; while (i--);
+
+			if (ksort < 2) 
+			{
+				SORTMODE rf;
+				rf.mode = -ksort;
+
+				qsort(arr, Num, sizeof(PVOID), (int (__cdecl *)(const void *, const void *))KModCompare);
+			}
+
+			HDC hdc = ::GetDC(cbi.hwndList);
+			HGDIOBJ o = (HGDIOBJ)::SendMessage(cbi.hwndList, WM_GETFONT, 0, 0);
+			if (o) o = SelectObject(hdc, o); else o = (HGDIOBJ)-1;
+
+			SIZE size;
+			RECT rc;
+			GetClientRect(cbi.hwndList, &rc);
+			SCROLLINFO si = { sizeof si };
+			si.fMask = SIF_ALL;
+			si.nPage = rc.right - rc.left;
+
+			WCHAR sz[MAX_PATH + 32];
+
+			i = 0;
+			do
+			{
+				csmi = arr[i];
+
+				swprintf(sz, L"[%p %p%c %c %c %S",
+					csmi->ImageBase, (PBYTE)csmi->ImageBase + csmi->ImageSize,
+					csmi->Flags & LDRP_IMAGE_NOT_AT_BASE ? L'[' : L')',
+					csmi->LoadCount == MAXUSHORT ? L'@' : L'$',
+					csmi->Flags & LDRP_STATIC_LINK ? L's' : L'd',
+					csmi->FullPathName);
+
+				GetTextExtentPoint32(hdc, sz, (int)wcslen(sz), &size);
+				if (si.nMax < size.cx) si.nMax = size.cx;
+				ComboBox_AddStringEx(hwndCtl, sz, csmi);
+
+			} while(++i < Num);
+
+			if (o != (HGDIOBJ)-1)SelectObject(hdc, o);
+
+			ReleaseDC(cbi.hwndList, hdc);
+
+			SendMessage(hwndCtl, CB_SETHORIZONTALEXTENT, si.nMax, 0);
+
+			si.nMax += 16;
+			SetScrollInfo(cbi.hwndList, SB_HORZ, &si, TRUE);
 		}
-
-		HDC hdc = ::GetDC(cbi.hwndList);
-		HGDIOBJ o = (HGDIOBJ)::SendMessage(cbi.hwndList, WM_GETFONT, 0, 0);
-		if (o) o = SelectObject(hdc, o); else o = (HGDIOBJ)-1;
-
-		SIZE size;
-		RECT rc;
-		GetClientRect(cbi.hwndList, &rc);
-		SCROLLINFO si = { sizeof si };
-		si.fMask = SIF_ALL;
-		si.nPage = rc.right - rc.left;
-
-		WCHAR sz[MAX_PATH + 32];
-
-		i = 0;
-		do
-		{
-			csmi = arr[i];
-
-			swprintf(sz, L"[%p %p%c %c %c %S",
-				csmi->ImageBase, (PBYTE)csmi->ImageBase + csmi->ImageSize,
-				csmi->Flags & LDRP_IMAGE_NOT_AT_BASE ? L'[' : L')',
-				csmi->LoadCount == MAXUSHORT ? L'@' : L'$',
-				csmi->Flags & LDRP_STATIC_LINK ? L's' : L'd',
-				csmi->FullPathName);
-
-			GetTextExtentPoint32(hdc, sz, (int)wcslen(sz), &size);
-			if (si.nMax < size.cx) si.nMax = size.cx;
-			ComboBox_AddStringEx(hwndCtl, sz, csmi);
-
-		} while(++i < Num);
-
-		if (o != (HGDIOBJ)-1)SelectObject(hdc, o);
-
-		ReleaseDC(cbi.hwndList, hdc);
-
-		SendMessage(hwndCtl, CB_SETHORIZONTALEXTENT, si.nMax, 0);
-
-		si.nMax += 16;
-		SetScrollInfo(cbi.hwndList, SB_HORZ, &si, TRUE);
-
 	}
 }
+#define FormatStatus(err, module, status) FormatMessage(\
+	FORMAT_MESSAGE_IGNORE_INSERTS|FORMAT_MESSAGE_FROM_HMODULE,\
+	GetModuleHandleW(L ## # module),status, 0, err, RTL_NUMBER_OF(err), 0)
+
+#define FormatWin32Status(err, status) FormatStatus(err, kernel32.dll, status)
+#define FormatNTStatus(err, status) FormatStatus(err, ntdll.dll, status)
 
 NTSTATUS DisplayStatus(HWND hwndDlg, NTSTATUS status, LPCWSTR sztext)
 {
@@ -398,7 +562,8 @@ protected:
 	HWND _GetData(HWND hwndDlg, PVOID* pBase, DWORD* pSize, BOOL* pbImage, DWORD* pcbFIleName);
 	BOOL GetData(HWND hwndDlg, PVOID* pBase, DWORD* pSize, BOOL* pbImage, DWORD* pcbFIleName);
 
-	void OnDropdownComboProcess(HWND hwndDlg);
+	static void OnDropdownComboProcess(HWND hwndDlg, SYSTEM_PROCESS_INFORMATION* sp);
+	static void OnDropdownComboProcess(HWND hwndDlg);
 	void OnCloseupComboProcess(HWND hwndDlg);
 	void OnSelchangeComboProcess(HWND hwndDlg);
 	void OnButtonFromModule(HWND hwndDlg);
@@ -479,7 +644,7 @@ BOOL CMemDumpDlg::OnInitDialog(HWND hwndDlg)
 	return TRUE;  // return TRUE  unless you set the focus to a control
 }
 
-void CMemDumpDlg::OnDropdownComboProcess(HWND hwndDlg) 
+void CMemDumpDlg::OnDropdownComboProcess(HWND hwndDlg, SYSTEM_PROCESS_INFORMATION* sp)
 {
 	HWND hwndCtl = ::GetDlgItem(hwndDlg, IDC_COMBO2);
 	ComboBox_ResetContent(hwndCtl);
@@ -487,24 +652,13 @@ void CMemDumpDlg::OnDropdownComboProcess(HWND hwndDlg)
 
 	if (!GetComboBoxInfo(hwndCtl, &cbi)) return ;
 
-	NTSTATUS status;
-	DWORD cb = 0, rcb = 0x10000, NextEntryDelta = 0;
-	SYSTEM_PROCESS_INFORMATION* sp = 0;
-	do 
-	{
-		if (cb < rcb) sp = (SYSTEM_PROCESS_INFORMATION*)alloca(rcb - cb), cb = rcb;
-		status = ZwQuerySystemInformation(SystemProcessInformation,
-			sp, cb, &rcb);
-	} while(status == STATUS_INFO_LENGTH_MISMATCH);
-
-	if (0 > status) return ;
+	ULONG cb = 0, rcb, NextEntryDelta = 0;
 
 	HDC hdc = ::GetDC(cbi.hwndList);
 	if (!hdc) return ;
 	HGDIOBJ o = (HGDIOBJ)::SendMessage(cbi.hwndList, WM_GETFONT, 0, 0);
 	if (o) o = SelectObject(hdc, o); else o = (HGDIOBJ)-1;
 
-	cb = 0;
 	SIZE size;
 	RECT rc;
 	::GetClientRect(cbi.hwndList, &rc);
@@ -520,7 +674,7 @@ void CMemDumpDlg::OnDropdownComboProcess(HWND hwndDlg)
 
 	do
 	{
-		sp = offset_ptr(sp, NextEntryDelta);
+		sp = (SYSTEM_PROCESS_INFORMATION*)RtlOffsetToPointer(sp, NextEntryDelta);
 		if (sp->UniqueProcessId)
 		{
 #ifdef _WIN64
@@ -529,14 +683,14 @@ void CMemDumpDlg::OnDropdownComboProcess(HWND hwndDlg)
 			PVOID wow;
 			WCHAR c = L'?';
 
-			if (0 <= ZwOpenProcess(&hProcess, g_xp ? PROCESS_QUERY_INFORMATION : PROCESS_QUERY_LIMITED_INFORMATION, &oa, &cid))
+			if (0 <= NtOpenProcess(&hProcess, g_xp ? PROCESS_QUERY_INFORMATION : PROCESS_QUERY_LIMITED_INFORMATION, &oa, &cid))
 			{		
-				if (0 <= ZwQueryInformationProcess(hProcess, ProcessWow64Information, &wow, sizeof(wow), 0))
+				if (0 <= NtQueryInformationProcess(hProcess, ProcessWow64Information, &wow, sizeof(wow), 0))
 				{
 					c = wow ? '*' : ' ';
 				}
 
-				ZwClose(hProcess);
+				NtClose(hProcess);
 			}
 #else
 			WCHAR c = L' ';
@@ -562,6 +716,30 @@ void CMemDumpDlg::OnDropdownComboProcess(HWND hwndDlg)
 
 	si.nMax += 16;
 	::SetScrollInfo(cbi.hwndList, SB_HORZ, &si, TRUE);
+}
+
+void CMemDumpDlg::OnDropdownComboProcess(HWND hwndDlg) 
+{
+	NTSTATUS status;
+	DWORD rcb = 0x1000;
+	do 
+	{
+		if (SYSTEM_PROCESS_INFORMATION* sp = (SYSTEM_PROCESS_INFORMATION*)LocalAlloc(0, rcb += PAGE_SIZE))
+		{
+			status = NtQuerySystemInformation(SystemProcessInformation, sp, rcb, &rcb);
+
+			if (0 <= status)
+			{
+				OnDropdownComboProcess(hwndDlg, sp);
+			}
+
+			LocalFree(sp);
+		}
+		else
+		{
+			break;
+		}
+	} while(status == STATUS_INFO_LENGTH_MISMATCH);
 }
 
 void CMemDumpDlg::OnSelchangeComboProcess(HWND hwndDlg) 
@@ -1028,7 +1206,8 @@ void ep(void*)
 	PVOID wow;
 	if (0 > ZwQueryInformationProcess(NtCurrentProcess(), ProcessWow64Information, &wow, sizeof(wow), 0) || wow)
 	{
-		MessageBox(0, L"use 64-bit version of MemDump!", 0, MB_ICONWARNING);
+		MessageBox(0, L"The 32-bit version of this program is not compatible with the 64-bit Windows you're running.", 
+			L"Machine Type Mismatch", MB_ICONWARNING);
 		ExitProcess(0);
 	}
 #else

@@ -10,14 +10,24 @@ public:
 	WLog(WLog&) = delete;
 	WLog(PVOID BaseAddress, ULONG RegionSize): _BaseAddress(BaseAddress), _RegionSize(RegionSize), _Ptr(0) {  }
 
-	ULONG size()
-	{
-		return _Ptr;
-	}
-
 	operator PCWSTR()
 	{
 		return (PCWSTR)_BaseAddress;
+	}
+
+	PWSTR _buf()
+	{
+		return (PWSTR)((PBYTE)_BaseAddress + _Ptr);
+	}
+
+	ULONG _cch()
+	{
+		return (_RegionSize - _Ptr) / sizeof(WCHAR);
+	}
+
+	ULONG size()
+	{
+		return _Ptr;
 	}
 
 	WLog& operator << (WCHAR c);

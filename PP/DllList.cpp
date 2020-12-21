@@ -661,7 +661,8 @@ class MySplit : public ZSplitWndV, RTL_AVL_TABLE
 		WCHAR msg[256];
 		if (status)
 		{
-			if (!FormatNTStatus(msg, status))
+			if (!FormatMessageW(FORMAT_MESSAGE_FROM_HMODULE|FORMAT_MESSAGE_IGNORE_INSERTS, 
+				GetModuleHandleW(L"ntdll"), status, 0, msg, _countof(msg), 0))
 			{
 				swprintf(msg, L"%x", status);
 			}
@@ -1239,7 +1240,7 @@ void ZMyApp::OnSignalObject(DWORD i)
 	}
 	else
 	{
-		DbgBreak();//??
+		__debugbreak();//??
 	}
 }
 
@@ -1267,11 +1268,6 @@ void zmain()
 	}
 }
 
-#define LAA(se) {{se},SE_PRIVILEGE_ENABLED|SE_PRIVILEGE_ENABLED_BY_DEFAULT}
-
-#define BEGIN_PRIVILEGES(tp, n) static const struct {ULONG PrivilegeCount;LUID_AND_ATTRIBUTES Privileges[n];} tp = {n,{
-#define END_PRIVILEGES }};
-
 NTSTATUS AdjustPrivileges()
 {
 	HANDLE hToken;
@@ -1282,7 +1278,7 @@ NTSTATUS AdjustPrivileges()
 			LAA(SE_DEBUG_PRIVILEGE),
 			LAA(SE_LOAD_DRIVER_PRIVILEGE)
 		END_PRIVILEGES	
-		status = ZwAdjustPrivilegesToken(hToken, FALSE, (PTOKEN_PRIVILEGES)&tp, 0, 0, 0);
+		status = ZwAdjustPrivilegesToken(hToken, FALSE, const_cast<PTOKEN_PRIVILEGES>(&tp), 0, 0, 0);
 		NtClose(hToken);
 	}
 	return status;
@@ -1298,7 +1294,8 @@ void ep(void*)
 	PVOID wow;
 	if (0 > ZwQueryInformationProcess(NtCurrentProcess(), ProcessWow64Information, &wow, sizeof(wow), 0) || wow)
 	{
-		MessageBox(0, L"use 64-bit version of Processes!", 0, MB_ICONWARNING);
+		MessageBox(0, L"The 32-bit version of this program is not compatible with the 64-bit Windows you're running.", 
+			L"Machine Type Mismatch", MB_ICONWARNING);
 		ExitProcess(0);
 	}
 #else

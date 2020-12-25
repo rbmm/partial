@@ -30,6 +30,8 @@ public:
 		return _Ptr;
 	}
 
+	void operator >> (HWND hwnd);
+
 	WLog& operator << (WCHAR c);
 
 	WLog& operator ()(PCWSTR format, ...);

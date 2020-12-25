@@ -376,13 +376,13 @@ void els(WLog& log)
 
 void ShowSessions(HWND hwnd)
 {
-	if (PWSTR buf = new WCHAR[0x80000])
+	if (PWSTR buf = (PWSTR)LocalAlloc(0, 0x80000))
 	{
 		WLog log(buf, 0x80000);
 		els(log);
 		SetThreadToken(0, 0);
-		SetWindowText(hwnd, buf);
-		delete [] buf;
+		log >> hwnd;
+		LocalFree(buf);
 	}
 }
 

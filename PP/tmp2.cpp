@@ -212,12 +212,12 @@ void ShowE2(HWND hWndParent, PCWSTR Caption, PCWSTR psz1, PCWSTR psz2, HFONT hFo
 void ShowProtectedProcesses(HWND hwnd, HFONT hFont)
 {
 	enum { cbAll = 0x20000, cbSmall = 0x2000};
-	if (PWSTR buf = new WCHAR[cbAll])
+	if (PWSTR buf = (PWSTR)LocalAlloc(0, cbAll))
 	{
 		WLog log0(buf, cbSmall), log((PBYTE)buf + cbSmall, cbAll - cbSmall);
 		els2(log0, log);
 		ShowE2(hwnd, L"Protected Processes", buf, (PWSTR)((PBYTE)buf + cbSmall), hFont);
-		delete [] buf;
+		LocalFree(buf);
 	}
 }
 

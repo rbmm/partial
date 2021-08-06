@@ -59,6 +59,8 @@ PSTR _lineHeap::alloc(PCSTR str)
 	return 0;
 }
 
+#define INRANGE(base, address, size) ((DWORD_PTR)(address) - (DWORD_PTR)(base) < (DWORD_PTR)(size))
+
 BOOL _lineHeap::AddressInHeap(PVOID Address) 
 {
 	return INRANGE((PBYTE)m_buf, Address, m_ptr - (PBYTE)m_buf);

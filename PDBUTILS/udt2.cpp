@@ -112,6 +112,7 @@ ULONG GetBasicTypeLen(CV_typ_t utype)
 	case T_UINT8:
 	case T_SHORT:
 	case T_USHORT:
+	case T_CHAR16:
 		return 2;
 	case T_INT4:
 	case T_UINT4:
@@ -119,6 +120,7 @@ ULONG GetBasicTypeLen(CV_typ_t utype)
 	case T_ULONG:
 	case T_HRESULT:
 	case T_REAL32:
+	case T_CHAR32:
 		return 4;
 	case T_QUAD:
 	case T_UQUAD:
@@ -1604,6 +1606,7 @@ ZType* TiEnum::_CreateUDT(CV_typ_t utype)
 
 		switch (utype &= 0xff)
 		{
+		case T_NOTYPE:
 		case T_CHAR:
 		case T_UCHAR:
 		case T_RCHAR:
@@ -1951,7 +1954,8 @@ ZType* TiEnum::CreateUDT(lfRecord* plr, BOOL bRecursive)
 
 	if (bRecursive)
 	{
-		__debugbreak();
+		//__debugbreak();
+		__nop();
 	}
 
 	return 0;
@@ -2251,7 +2255,7 @@ BOOL TiEnum::ProcessFieldList(ZType* pType, CV_typ_t field)
 
 ZType* TiEnum::ExpandUdt(ZType* pType, USHORT parmcount, CV_typ_t rvtype, CV_typ_t arglist)
 {
-	if (!rvtype || (parmcount && !arglist))
+	if (/*!rvtype || */(parmcount && !arglist)) // !!!!
 	{
 		__debugbreak();
 		return 0;

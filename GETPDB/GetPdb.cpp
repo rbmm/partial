@@ -312,11 +312,10 @@ class CDialog : public ZDllVector
 		{
 			if (PCSTR name = GetName(m_nv[i]))
 			{
-				ULONG len = (ULONG)strlen(name) + (ULONG)strlen(msg) + 64;
-				if (m_cbFree > len)
+				LONG len = sprintf_s(m_szLog + e_LogSize - m_cbFree, m_cbFree, "%s - %s - %x\r\n", name, msg, status);
+				if (0 < len)
 				{
-					PSTR buf = m_szLog + e_LogSize - m_cbFree;
-					m_cbFree -= sprintf(buf, "%s - %s - %x\r\n", name, msg, status);
+					m_cbFree -= len;
 				}
 			}
 		}
@@ -431,7 +430,7 @@ class CDialog : public ZDllVector
 		case e_connect:
 			if ((NTSTATUS)lParam)
 			{
-				swprintf(sz, L"connect error %x", (ULONG)lParam);
+				swprintf(sz, L"connect error %u", (ULONG)lParam);
 				SetWindowText(m_arr[wParam].hwndStatus, sz);
 				SetOverallProgress((NTSTATUS)lParam);
 			}
@@ -759,7 +758,7 @@ public:
 		}
 		if (m_szLog)
 		{
-			delete m_szLog;
+			delete [] m_szLog;
 		}
 
 		if (m_hRoot)
@@ -787,19 +786,10 @@ public:
 	}
 };
 
-void  onIOunlock(void)
-{
-}
-
-#define LAA(se) {{se},SE_PRIVILEGE_ENABLED|SE_PRIVILEGE_ENABLED_BY_DEFAULT}
-
-#define BEGIN_PRIVILEGES(tp, n) static const struct {ULONG PrivilegeCount;LUID_AND_ATTRIBUTES Privileges[n];} tp = {n,{
-#define END_PRIVILEGES }};
-
 NTSTATUS AdjustPrivileges()
 {
 	HANDLE hToken;
-	NTSTATUS status = ZwOpenProcessToken(NtCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hToken);
+	NTSTATUS status = NtOpenProcessToken(NtCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hToken);
 	if (0 <= status)
 	{
 		BEGIN_PRIVILEGES(tp, 3)
@@ -807,22 +797,20 @@ NTSTATUS AdjustPrivileges()
 			LAA(SE_LOAD_DRIVER_PRIVILEGE),
 			LAA(SE_MANAGE_VOLUME_PRIVILEGE)
 		END_PRIVILEGES	
-		status = ZwAdjustPrivilegesToken(hToken, FALSE, (PTOKEN_PRIVILEGES)&tp, 0, 0, 0);
-		ZwClose(hToken);
+		status = NtAdjustPrivilegesToken(hToken, FALSE, const_cast<PTOKEN_PRIVILEGES>(&tp), 0, 0, 0);
+		NtClose(hToken);
 	}
 	return status;
 }
 
-//extern ULONG gTlsIndex;
-
 void _ep()
 {
-	//gTlsIndex = TlsAlloc();
 #ifndef _WIN64
 	PVOID wow;
 	if (0 > ZwQueryInformationProcess(NtCurrentProcess(), ProcessWow64Information, &wow, sizeof(wow), 0) || wow)
 	{
-		MessageBox(0, L"use 64-bit version of GetPdb!", 0, MB_ICONWARNING);
+		MessageBox(0, L"The 32-bit version of this program is not compatible with the 64-bit Windows you're running.", 
+			L"Machine Type Mismatch", MB_ICONWARNING);
 		return;
 	}
 #else
@@ -862,16 +850,11 @@ void _ep()
 	}
 }
 
-struct MY_RUNDOWN_REF : RUNDOWN_REF
+void IO_RUNDOWN::RundownCompleted()
 {
-	virtual void RundownCompleted()
-	{
-		destroyterm();
-		ExitProcess(0);
-	}
-} g_myRR;
-
-RUNDOWN_REF * g_IoRundown = &g_myRR;
+	destroyterm();
+	ExitProcess(0);
+}
 
 void ep(void*)
 {
@@ -879,7 +862,7 @@ void ep(void*)
 
 	_ep();
 
-	g_IoRundown->BeginRundown();
+	IO_RUNDOWN::g_IoRundown.BeginRundown();
 }
 
 _NT_END

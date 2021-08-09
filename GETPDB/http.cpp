@@ -11,6 +11,7 @@ _NT_BEGIN
 BOOL IsValidPDBExist(POBJECT_ATTRIBUTES poa, PGUID Signature, DWORD Age);
 
 //#undef DbgPrint
+#define DbgPrintEx /##/
 
 PSTR ParseHTTPStatusLine(PSTR buf, ULONG cb, PULONG pStatusCode, PULONG pdwMajorVersion = 0, PULONG pdwMinorVersion = 0)
 {
@@ -267,7 +268,7 @@ public:
 	{
 		if (getHandleNoLock()) __debugbreak();
 
-		DbgPrint("<%p>eof=%I64x\n", this, EndOfFile->QuadPart);
+		//DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL, "%s<%p>(%wZ, %I64x)\n", __FUNCTION__, this, poa->ObjectName, EndOfFile->QuadPart);
 
 		HANDLE hFile;
 		IO_STATUS_BLOCK iosb;
@@ -572,7 +573,7 @@ private:
 
 	virtual void OnDisconnect()
 	{
-		DbgPrint("%08x:%s<%p> [%u]\n", GetCurrentThreadId(), __FUNCTION__, this, GetTickCount());
+		//DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL, "%s<%p>\n", __FUNCTION__, this);
 		
 		if (_bRedirected)
 		{
@@ -593,6 +594,7 @@ private:
 		_dwHeadSize = 0;
 
 		PostMessage(_hwnd, e_connect, _id, dwError);
+		DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL, "%s<%p>(%u) [%x]\n", __FUNCTION__, this, dwError, _bSSL);
 
 		if (dwError)
 		{
@@ -617,7 +619,7 @@ private:
 
 	virtual SECURITY_STATUS OnEndHandshake()
 	{
-		DbgPrint("%s<%p>\n", __FUNCTION__, this);
+		//DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL, "%s<%p>\n", __FUNCTION__, this);
 		PostMessage(_hwnd, e_text, _id, (LPARAM)L"EndHandshake");
 
 		_bHandshakeDone = TRUE;
@@ -929,6 +931,7 @@ private:
 
 	virtual void OnIp(DWORD ip)
 	{
+		DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL, "%s<%p>(%s) = %x\n", __FUNCTION__, this, (PSTR)ZRingBuffer::GetBuffer() + _dwGetDataSize, ip);
 		if (ip)
 		{
 			if (ULONG err = Connect(ip, _nPort))
@@ -1027,7 +1030,9 @@ public:
 			if (bRedirected)
 			{
 				PostMessage(_hwnd, e_text, _id, (LPARAM)L"resolving host...");
-				DnsToIp((PCSTR)ZRingBuffer::GetBuffer() + _dwGetDataSize);
+				DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL, "%s<%p>(%s)\n", __FUNCTION__, this, (PSTR)ZRingBuffer::GetBuffer() + _dwGetDataSize);
+
+				DnsToIp((PCSTR)ZRingBuffer::GetBuffer() + _dwGetDataSize, DNS_RTYPE_A, DNS_QUERY_NO_WIRE_QUERY);
 				return;
 			}
 
@@ -1245,6 +1250,8 @@ public:
 
 		NTSTATUS status = NtCreateFile(&hRoot, FILE_ADD_SUBDIRECTORY|SYNCHRONIZE, &oa, &iosb, 0, 
 			0, FILE_SHARE_VALID_FLAGS, FILE_OPEN_IF, FILE_DIRECTORY_FILE, 0, 0);
+
+		//DbgPrintEx ( DPFLTR_DEFAULT_ID, DPFLTR_INFO_LEVEL, "%s<%p>: %wZ\n",  __FUNCTION__, this, &ObjectName);
 
 		if (0 > status)
 		{

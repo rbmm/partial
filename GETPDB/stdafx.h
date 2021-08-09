@@ -8,7 +8,9 @@
 
 #include "../inc/StdAfx.h"
 #include <WindowsX.h>
-#include <ws2spi.h>
+#include <WinDNS.h>
+#include <ws2ipdef.h>
+#include <mstcpip.h>
 #include <MSWSock.h>
 #include <commctrl.h>
 _NT_BEGIN

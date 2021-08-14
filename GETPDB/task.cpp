@@ -45,19 +45,21 @@ void DLL_TASK::ProcessTask(UU* p)
 	}
 	else
 	{
-		static volatile UCHAR guz;
-		PVOID stack = alloca(guz);
-		ULONG cb = 0, rcb = 0x10000;
-		PRTL_PROCESS_MODULES psmi = 0;
+		ULONG cb = 0x40000;
 		do 
 		{
-			if (cb < rcb) cb = RtlPointerToOffset(psmi = (PRTL_PROCESS_MODULES)alloca(rcb - cb), stack);
+			status = STATUS_NO_MEMORY;
 
-			if (0 <= (status = ZwQuerySystemInformation(SystemModuleInformation, psmi, cb, &rcb)))
+			if (PUCHAR buf = new UCHAR [cb])
 			{
-				status = p->create(psmi);
-				break;
+				if (0 <= (status = ZwQuerySystemInformation(SystemModuleInformation, buf, cb, &cb)))
+				{
+					status = p->create((PRTL_PROCESS_MODULES)buf);
+					break;
+				}
+				delete [] buf;
 			}
+
 		} while (status == STATUS_INFO_LENGTH_MISMATCH);
 	}
 

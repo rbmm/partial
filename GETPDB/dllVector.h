@@ -111,7 +111,7 @@ public:
 
 	PCSTR GetName(LONG n)
 	{
-		return 0 > n ? 0 : RtlOffsetToPointer(_offsets,_offsets[n]);
+		return 0 > n ? 0 : reinterpret_cast<CNT_MODULE_INFORMATION*>(RtlOffsetToPointer(_offsets, _offsets[n]))->FullPathName;
 	}
 
 	PCSTR GetNextName(PLONG pn)

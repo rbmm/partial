@@ -18,7 +18,8 @@ struct DLL_LIST : RTL_AVL_TABLE
 {
 	static RTL_GENERIC_COMPARE_RESULTS NTAPI Compare(PRTL_AVL_TABLE , PVOID FirstStruct, PVOID SecondStruct)
 	{
-		int i = strcmp((PCSTR)FirstStruct, (PCSTR)SecondStruct);
+		int i = strcmp(reinterpret_cast<CNT_MODULE_INFORMATION*>(FirstStruct)->FullPathName, 
+			reinterpret_cast<CNT_MODULE_INFORMATION*>(SecondStruct)->FullPathName);
 
 		if (0 > i) return GenericLessThan;
 		if (0 < i) return GenericGreaterThan;
@@ -45,7 +46,13 @@ struct DLL_LIST : RTL_AVL_TABLE
 				PULONG pu = *ppu;
 				*pu = RtlPointerToOffset(base, buf);
 				*ppu = pu + 1;
-				buf = xcscpy(buf, (PCSTR)(prbl + 1));
+				CNT_MODULE_INFORMATION* pcmi = reinterpret_cast<CNT_MODULE_INFORMATION*>(prbl + 1);
+				*(PSHORT)buf = pcmi->LoadCount, buf += sizeof(SHORT);
+				buf = xcscpy(buf, pcmi->FullPathName);
+				if ((ULONG_PTR)buf & 1)
+				{
+					buf++;
+				}
 			}
 			buf = FreeTable(prbl->RightChild, buf, ppu, base);
 			LocalFree(prbl);
@@ -80,6 +87,9 @@ void EnumAllDlls(HWND hwnd)
 	//RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, TRUE, FALSE, &b);
 
 	BOOL bFail = TRUE;
+	PCHAR buf;
+	ULONG N = 0, size = 0;
+	DLL_LIST table;
 
 	WorkQueue queue;
 	if (queue.Init())
@@ -89,119 +99,140 @@ void EnumAllDlls(HWND hwnd)
 		if (0 <= task.Init())
 		{
 			NTSTATUS status;
-			DWORD rcb = 0x10000, cb = 0;
-			static volatile UCHAR guz;
-			PVOID stack = alloca(guz);
-			union {
-				PVOID buf;
-				PSYSTEM_PROCESS_INFORMATION pspi;
-				PBYTE pb;
-			};
+			ULONG cb = 0x80000;
 
 			do 
 			{
-				if (cb < rcb)
+				status = STATUS_NO_MEMORY;
+
+				if (buf = new CHAR[cb])
 				{
-					cb = RtlPointerToOffset(buf = alloca(rcb - cb), stack);
-				}
-
-				if (0 <= (status = ZwQuerySystemInformation(SystemProcessInformation, pspi, cb, &rcb)))
-				{
-					task.BeginTasks();
-
-					DoIoControl(IOCTL_SetProtectedProcess);
-
-					ULONG NextEntryOffset = 0;
-					do 
+					if (0 <= (status = NtQuerySystemInformation(SystemProcessInformation, buf, cb, &cb)))
 					{
-						pb += NextEntryOffset;
+						task.BeginTasks();
 
-						if (pspi->UniqueProcessId)
+						DoIoControl(IOCTL_SetProtectedProcess);
+
+						union {
+							PSYSTEM_PROCESS_INFORMATION pspi;
+							PCHAR pb;
+						};
+
+						pb = buf;
+
+						ULONG NextEntryOffset = 0;
+						do 
 						{
-							task.QueueTask(&queue, pspi);
-						}
-					} while (NextEntryOffset = pspi->NextEntryOffset);
+							pb += NextEntryOffset;
 
-					task.EndTasks();
-
-					BOOLEAN b;
-					PCWSTR systemroot = USER_SHARED_DATA->NtSystemRoot;
-					DWORD _len = (ULONG)wcslen(systemroot), len, N = 0;
-					PSTR sz = (PSTR)alloca(_len), _sz = sz;
-					WCHAR c;
-					do 
-					{
-						*sz++ = (CHAR)tolower(c = *systemroot++);
-					} while (c);
-					
-					cb = 0;
-					DLL_LIST table;
-
-					do 
-					{
-						if (0 <= ZwWaitForSingleObject(task._hSemaphore, FALSE, 0))
-						{
-							if (UU* p = task.PopReadyTask())
+							if (pspi->UniqueProcessId)
 							{
-								NTSTATUS s = p->status;
+								task.QueueTask(&queue, pspi);
+							}
+						} while (NextEntryOffset = pspi->NextEntryOffset);
 
-								if (0 <= s && s != STATUS_TIMEOUT)
+						task.EndTasks();
+
+						BOOLEAN b;
+						PCWSTR systemroot = USER_SHARED_DATA->NtSystemRoot;
+						ULONG _len = (ULONG)wcslen(systemroot), len;
+						PSTR sz = (PSTR)alloca(_len), _sz = sz;
+						WCHAR c;
+						do 
+						{
+							*sz++ = (CHAR)tolower(c = *systemroot++);
+						} while (c);
+
+						do 
+						{
+							if (0 <= ZwWaitForSingleObject(task._hSemaphore, FALSE, 0))
+							{
+								if (UU* p = task.PopReadyTask())
 								{
-									if (PRTL_PROCESS_MODULES prpm = p->get())
+									NTSTATUS s = p->status;
+
+									if (0 <= s && s != STATUS_TIMEOUT)
 									{
-										if (ULONG NumberOfModules = prpm->NumberOfModules)
+										if (PRTL_PROCESS_MODULES prpm = p->get())
 										{
-											PRTL_PROCESS_MODULE_INFORMATION Modules = prpm->Modules;
-											do 
+											if (ULONG NumberOfModules = prpm->NumberOfModules)
 											{
-												PSTR FullPathName = _strlwr(Modules->FullPathName);
-												len = (ULONG)strlen(FullPathName);
-												STATIC_ASTRING(SystemRoot, "\\systemroot\\");
-												if (
-													(_len < len && !memcmp(FullPathName, _sz, _len)) || 
-													(RTL_NUMBER_OF(SystemRoot) - 1 < len && !memcmp(FullPathName, SystemRoot, RTL_NUMBER_OF(SystemRoot) - 1))
-													)
+												PRTL_PROCESS_MODULE_INFORMATION Modules = prpm->Modules;
+												do 
 												{
-													if (RtlInsertElementGenericTableAvl(&table, FullPathName, 1 + len, &b) && b)
+													PSTR FullPathName = _strlwr(Modules->FullPathName);
+													len = (ULONG)strlen(FullPathName);
+													STATIC_ASTRING(SystemRoot, "\\systemroot\\");
+													if (
+														(_len < len && !memcmp(FullPathName, _sz, _len)) || 
+														(RTL_NUMBER_OF(SystemRoot) - 1 < len && !memcmp(FullPathName, SystemRoot, RTL_NUMBER_OF(SystemRoot) - 1))
+														)
 													{
-														N++;
-														cb += len + 1;
+														Modules->OffsetToFileName = 0 > (LONG_PTR)Modules->ImageBase ? 0x8000 : 0;
+
+														if (CNT_MODULE_INFORMATION* pcmi = (CNT_MODULE_INFORMATION*)
+															RtlInsertElementGenericTableAvl(&table, 
+															&Modules->OffsetToFileName, sizeof(USHORT) + 1 + len, &b))
+														{
+															pcmi->LoadCount++;
+															if (b)
+															{
+																N++;
+																size += FIELD_OFFSET(CNT_MODULE_INFORMATION, FullPathName[(len + 2) & ~1]);
+															}
+														}
 													}
-												}
-												
-											} while (Modules++, --NumberOfModules);
+
+												} while (Modules++, --NumberOfModules);
+											}
 										}
 									}
+
+									delete p;
 								}
-
-								delete p;
 							}
-						}
 
-					} while (!task.IsAllTasksDone());
+						} while (!task.IsAllTasksDone());
 
-					DoIoControl(IOCTL_DelProtectedProcess);
-
-					if (N)
-					{
-						if (PCHAR Buf = new CHAR[cb + (N << 2)])
-						{
-							PULONG pu = (PULONG)Buf;
-							table.FreeTableAndFill(Buf + (N << 2), &pu, Buf);
-
-							bFail = FALSE;
-							if (SendMessage(hwnd, e_List, N, (LPARAM)Buf) != e_List)
-							{
-								delete Buf;
-							}
-						}
+						DoIoControl(IOCTL_DelProtectedProcess);
 					}
+
+					delete [] buf;
 				}
 
 			} while (status == STATUS_INFO_LENGTH_MISMATCH);
+
 		}
 		
 		queue.Stop(TRUE, 0);
+	}
+
+	if (N)
+	{
+		if (buf = new CHAR[size + (N << 2)])
+		{
+			PULONG pu = (PULONG)buf;
+			table.FreeTableAndFill(buf + (N << 2), &pu, buf);
+
+			struct L {
+				static int __cdecl compare(void* base, const void* p, const void* q)
+				{
+					ULONG a = reinterpret_cast<CNT_MODULE_INFORMATION*>(RtlOffsetToPointer(base, *(ULONG*)p))->LoadCount;
+					ULONG b = reinterpret_cast<CNT_MODULE_INFORMATION*>(RtlOffsetToPointer(base, *(ULONG*)q))->LoadCount;
+
+					if ((UCHAR)a < (UCHAR)b) return -1;
+					if ((UCHAR)a > (UCHAR)b) return +1;
+					return a - b;
+				}
+			};
+			qsort_s(buf, N, sizeof(ULONG), L::compare, buf);
+
+			bFail = FALSE;
+			if (SendMessage(hwnd, e_List, N, (LPARAM)buf) != e_List)
+			{
+				delete [] buf;
+			}
+		}
 	}
 
 	if (bFail)

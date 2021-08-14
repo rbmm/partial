@@ -321,7 +321,7 @@ class CDialog : public ZDllVector
 		}
 	}
 
-	void SetOverallProgress(ULONG status)
+	void SetOverallProgress(NTSTATUS status)
 	{
 		switch (status)
 		{
@@ -447,23 +447,19 @@ class CDialog : public ZDllVector
 			break;
 
 		case e_disconnect:
+			SetOverallProgress((NTSTATUS)lParam);
 			if (lParam)
 			{
-				SetOverallProgress(0);
-				if (!m_bAll) 
-				{
-					SetWindowText(m_arr[wParam].hwndStatus, L"OK");
-					if (m_hwndCD)
-					{
-						PostMessageW(m_hwndCD, WM_COMMAND, IDOK, 0);
-					}
-				}
-			}
-			else
-			{
 				SetWindowText(m_arr[wParam].hwndStatus, L"download fail");
-				SetOverallProgress(ERROR_GEN_FAILURE);
-				DoLog((UINT)wParam, "download", STATUS_UNSUCCESSFUL);
+				DoLog((UINT)wParam, "download", (NTSTATUS)lParam);
+			}
+			else if (!m_bAll) 
+			{
+				SetWindowText(m_arr[wParam].hwndStatus, L"OK");
+				if (m_hwndCD)
+				{
+					PostMessageW(m_hwndCD, WM_COMMAND, IDOK, 0);
+				}
 			}
 			break;
 
@@ -803,6 +799,96 @@ NTSTATUS AdjustPrivileges()
 	return status;
 }
 
+#undef DbgPrint
+
+class CReset : public CTcpEndpoint
+{
+	ULONG _n = 2;
+
+	virtual ~CReset()
+	{
+		DbgPrint("%s<%p>\n", __FUNCTION__, this);
+	}
+
+	virtual BOOL OnConnect(ULONG dwError)
+	{
+		DbgPrint("%s<%p>(%u)\n", __FUNCTION__, this, dwError);
+		return TRUE;
+	}
+
+	virtual void OnDisconnect()
+	{
+		DbgPrint("%s<%p>\n", __FUNCTION__, this);
+		if (--_n)
+		{
+			Connect(0xdbc54fcc, 0x5000);
+		}
+	}
+
+	virtual BOOL OnRecv(PSTR Buffer, ULONG cbTransferred)
+	{
+		DbgPrint("%s<%p>(%u)\n", __FUNCTION__, this, cbTransferred);
+		ULONG cb;
+		do 
+		{
+			cb = min(cbTransferred, 0x100);
+			DbgPrint("%.*s", cb, Buffer);
+
+		} while (Buffer += cb, cbTransferred -= cb);
+
+		return TRUE;
+	}
+
+	virtual ULONG GetConnectData(void** ppSendBuffer)
+	{
+		STATIC_ASTRING(get_SLC, "GET /download/symbols/SLC.pdb/2381BED24B44C275A716359F5CF286ED1/SLC.pdb HTTP/1.1\r\n"
+			"User-Agent: Microsoft-Symbol-Server/10.0.0.0\r\n"
+			"Host: msdl.microsoft.com\r\n"
+			"Connection: close\r\n"
+			"\r\n");
+		STATIC_ASTRING(get_comctl, "GET /download/symbols/comctl32.pdb/938014CE8049EFBEFA8894048D2B8C701/comctl32.pdb HTTP/1.1\r\n"
+			"User-Agent: Microsoft-Symbol-Server/10.0.0.0\r\n"
+			"Host: msdl.microsoft.com\r\n"
+			"Connection: close\r\n"
+			"\r\n");
+
+		switch (_n)
+		{
+		case 2:
+			*ppSendBuffer = (void*)get_SLC;
+			return sizeof(get_SLC) - 1;
+		case 1:
+			*ppSendBuffer = (void*)get_comctl;
+			return sizeof(get_comctl) - 1;
+		}
+		return 0;
+	}
+
+	virtual void LogError(DWORD opCode, DWORD dwError)
+	{
+		DbgPrint("%s<%p>(%.4s %x(%u))\n", __FUNCTION__, this, &opCode, RtlGetLastNtStatus(), dwError);
+	}
+public:
+	CReset()
+	{
+		DbgPrint("%s<%p>\n", __FUNCTION__, this);
+	}
+};
+
+void mpt()
+{
+	if (CReset* p = new CReset)
+	{
+		if (!p->Create(0x8000))
+		{
+			p->Connect(0xdbc54fcc, 0x5000);
+		}
+		p->Release();
+	}
+
+	MessageBoxW(0,0,0,0);
+}
+
 void _ep()
 {
 #ifndef _WIN64
@@ -833,6 +919,7 @@ void _ep()
 	WSADATA wd;
 	if (!WSAStartup(WINSOCK_VERSION, &wd))
 	{
+		//mpt();
 		if (SharedCred* Cred = new SharedCred)
 		{
 			if (0 <= Cred->Acquire(SECPKG_CRED_OUTBOUND, 0, SCH_CRED_NO_DEFAULT_CREDS|SCH_CRED_MANUAL_CRED_VALIDATION))

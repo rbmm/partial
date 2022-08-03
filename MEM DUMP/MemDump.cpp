@@ -9,22 +9,15 @@ _NT_BEGIN
 #include "../winz/app.h"
 #include "../winz/window.h"
 #include "../inc/rtlframe.h"
-
+extern const volatile UCHAR guz = 0;
 #ifdef _WIN64
 
 #include "../wow/wow.h"
 
-PVOID g_LdrQueryProcessModuleInformationWow;
-PVOID g_RtlExitUserThreadWow;
-
-BEGIN_WOW_DLL(ntdll)
-	WOW_FUNC(LdrQueryProcessModuleInformation)
-	WOW_FUNC(RtlExitUserThread)
-END_HOOK()
-
-WOW_PROCS_BEGIN()
-	WOW_DLL(ntdll)
-END_HOOK()
+BEGIN_DLL_FUNCS(ntdll, 0)
+	FUNC(LdrQueryProcessModuleInformation),
+	FUNC(RtlExitUserThread),
+END_DLL_FUNCS();
 
 #endif
 
@@ -343,17 +336,19 @@ NTSTATUS QUERY_PROCESS_MODULES::_query(HANDLE UniqueProcess)
 
 #ifdef _WIN64
 			PVOID wow;
+			PVOID LdrQueryProcessModuleInformationWow = ntdll.funcs[0].pv;
+			PVOID RtlExitUserThreadWow = ntdll.funcs[1].pv;
 
 			if (
 				0 <= status && status != STATUS_TIMEOUT &&
 				0 <= ZwQueryInformationProcess(hProcess, ProcessWow64Information, &wow, sizeof(wow), 0) && wow &&
-				g_LdrQueryProcessModuleInformationWow && g_RtlExitUserThreadWow &&
-				(!ExportSuppression || (0 <= SetExportValid(hProcess, g_LdrQueryProcessModuleInformationWow, g_RtlExitUserThreadWow)))
+				LdrQueryProcessModuleInformationWow && RtlExitUserThreadWow &&
+				(!ExportSuppression || (0 <= SetExportValid(hProcess, LdrQueryProcessModuleInformationWow, RtlExitUserThreadWow)))
 				)
 			{
-				if (0 <= RtlCreateUserThread(hProcess, 0, TRUE, 0, 0, 0, (void*)g_RtlExitUserThreadWow, 0, &hThread, 0))
+				if (0 <= RtlCreateUserThread(hProcess, 0, TRUE, 0, 0, 0, RtlExitUserThreadWow, 0, &hThread, 0))
 				{
-					RtlQueueApcWow64Thread(hThread, (PKNORMAL_ROUTINE)g_LdrQueryProcessModuleInformationWow, 
+					RtlQueueApcWow64Thread(hThread, (PKNORMAL_ROUTINE)LdrQueryProcessModuleInformationWow, 
 						RtlOffsetToPointer(RemoteBaseAddress, secsize), 
 						(PVOID)(secsize - sizeof(ULONG)), 
 						(PBYTE)RemoteBaseAddress + 2*secsize - sizeof(ULONG));
@@ -1179,23 +1174,19 @@ void CMemDumpDlg::OnButtonDump(HWND hwndDlg)
 #define MAX_DESTRUCTOR_COUNT 8
 
 #include "../inc/initterm.h"
-#define LAA(se) {{se},SE_PRIVILEGE_ENABLED|SE_PRIVILEGE_ENABLED_BY_DEFAULT}
-
-#define BEGIN_PRIVILEGES(tp, n) static const struct {ULONG PrivilegeCount;LUID_AND_ATTRIBUTES Privileges[n];} tp = {n,{
-#define END_PRIVILEGES }};
 
 NTSTATUS AdjustPrivileges()
 {
 	HANDLE hToken;
-	NTSTATUS status = ZwOpenProcessToken(NtCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hToken);
+	NTSTATUS status = NtOpenProcessToken(NtCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &hToken);
 	if (0 <= status)
 	{
 		BEGIN_PRIVILEGES(tp, 2)
 			LAA(SE_DEBUG_PRIVILEGE),
 			LAA(SE_LOAD_DRIVER_PRIVILEGE)
 		END_PRIVILEGES	
-		status = ZwAdjustPrivilegesToken(hToken, FALSE, (PTOKEN_PRIVILEGES)&tp, 0, 0, 0);
-		ZwClose(hToken);
+		status = NtAdjustPrivilegesToken(hToken, FALSE, (PTOKEN_PRIVILEGES)&tp, 0, 0, 0);
+		NtClose(hToken);
 	}
 	return status;
 }
@@ -1204,14 +1195,14 @@ void ep(void*)
 {
 #ifndef _WIN64
 	PVOID wow;
-	if (0 > ZwQueryInformationProcess(NtCurrentProcess(), ProcessWow64Information, &wow, sizeof(wow), 0) || wow)
+	if (0 > NtQueryInformationProcess(NtCurrentProcess(), ProcessWow64Information, &wow, sizeof(wow), 0) || wow)
 	{
 		MessageBox(0, L"The 32-bit version of this program is not compatible with the 64-bit Windows you're running.", 
 			L"Machine Type Mismatch", MB_ICONWARNING);
 		ExitProcess(0);
 	}
 #else
-	getWowProcs();
+	DLL_LIST_0::Process(&ntdll);
 #endif
 
 	NTSTATUS status = AdjustPrivileges();

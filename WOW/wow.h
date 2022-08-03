@@ -1,30 +1,27 @@
 #pragma once
 
-struct EXPORT_ENTRY 
-{
-	PCSTR Name;
-	PVOID* pAddress;
+struct DLL_LIST_0 
+{	
+	struct FUNCTION
+	{
+		PCSTR lpProcName;
+		PVOID pv;
+	};
+
+	DLL_LIST_0 *next;
+
+	union {
+		PCWSTR lpModuleName;
+		HMODULE hmod;
+	};
+
+	FUNCTION funcs[];
+
+	static void Process(DLL_LIST_0 *cur);
 };
 
-struct WOW_DLL 
-{
-	PCWSTR Name;
-	const EXPORT_ENTRY* entry;
-};
+#define BEGIN_DLL_FUNCS(name, prevname) DLL_LIST_0 name { prevname, _CRT_WIDE(_CRT_STRINGIZE(name)), {
+#define END_DLL_FUNCS() {}}}
 
-#define WOW_DLL_NAME(dll_name) dll_name##_WOW
-
-#define BEGIN_WOW_DLL(dll_name) namespace WOW_DLL_NAME(dll_name) { const WCHAR name[] = L ## #dll_name L".DLL"; const EXPORT_ENTRY a[] = {
-#define WOW_FUNC(func) { #func, &g_ ## func ## Wow },
-#define WOW_ORD(o) { "#" ## #o, &g_ ## o ## Wow },
-
-#define WOW_PROCS_BEGIN() namespace WOW_PROCS { const WOW_DLL a[] = {
-#define WOW_DLL(dll_name) { WOW_DLL_NAME(dll_name)::name, WOW_DLL_NAME(dll_name)::a },
-
-#ifndef END_HOOK
-#define END_HOOK() {}};}
-#endif
-
-namespace WOW_PROCS { extern const WOW_DLL a[]; };
-
-void getWowProcs();
+#define FUNC(name) { _CRT_STRINGIZE(name) }
+#define ORDN(n) { MAKEINTRESOURCEA(n) }

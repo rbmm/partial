@@ -6,14 +6,6 @@
 #include "../inc/idcres.h"
 #include "resource.h"
 
-struct GLOBALS_EX : ZGLOBALS
-{
-	GLOBALS_EX();
-	~GLOBALS_EX();
-	HFONT _hDlgFont;
-	HWND _hwndTask;
-};
-
 #ifdef _WIN64
 #define uptoul _wcstoui64
 #else

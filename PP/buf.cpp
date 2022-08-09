@@ -4,15 +4,20 @@ _NT_BEGIN
 
 #include "buf.h"
 
-void WLog::operator >> (HWND hwnd)
+void SetEditText(HWND hwnd, PVOID txt)
 {
 	PVOID pv = (PVOID)SendMessage(hwnd, EM_GETHANDLE, 0, 0);
-	SendMessage(hwnd, EM_SETHANDLE, (WPARAM)_BaseAddress, 0);
-	_BaseAddress = 0;
+	SendMessage(hwnd, EM_SETHANDLE, (WPARAM)txt, 0);
 	if (pv)
 	{
 		LocalFree(pv);
 	}
+}
+
+void WLog::operator >> (HWND hwnd)
+{
+	SetEditText(hwnd, _BaseAddress);
+	_BaseAddress = 0;
 }
 
 WLog& WLog::operator << (WCHAR c)

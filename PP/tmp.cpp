@@ -82,12 +82,8 @@ BOOL Impersonate(PVOID buf)
 	return FALSE;
 }
 
-extern ULONG gNtVersion;
-
 void Update(WLog& log, PVOID Ptr)
 {
-	ULONG DesiredAccess = gNtVersion < _WIN32_WINNT_VISTA ? PROCESS_QUERY_INFORMATION : PROCESS_QUERY_LIMITED_INFORMATION;
-
 	union {
 		PBYTE pb;
 		PVOID pv;
@@ -108,7 +104,7 @@ void Update(WLog& log, PVOID Ptr)
 			HANDLE hProcess, hToken;
 
 			NTSTATUS status;
-			if (0 > (status = NtOpenProcess(&hProcess, DesiredAccess, &zoa, &cid)))
+			if (0 > (status = NtOpenProcess(&hProcess, PROCESS_QUERY_LIMITED_INFORMATION, &zoa, &cid)))
 			{
 				log(L"OpenProcess(%p,%wZ)=%x\r\n", cid.UniqueProcess, &pspi->ImageName, status);
 			}
@@ -382,7 +378,6 @@ void ShowSessions(HWND hwnd)
 		els(log);
 		SetThreadToken(0, 0);
 		log >> hwnd;
-		LocalFree(buf);
 	}
 }
 

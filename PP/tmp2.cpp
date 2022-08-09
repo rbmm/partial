@@ -1,10 +1,9 @@
 #include "StdAfx.h"
-
+#include "../NtVer/nt_ver.h"
 _NT_BEGIN
 
 extern OBJECT_ATTRIBUTES zoa;
 extern volatile UCHAR guz;
-extern ULONG gNtVersion;
 
 #include "buf.h"
 
@@ -21,7 +20,7 @@ void els(PVOID Buf, WLog& log0, WLog& log)
 	LARGE_INTEGER li;
 	GetSystemTimeAsFileTime((PFILETIME)&li);
 
-	BOOL bExistProtectionInfo = gNtVersion >= _WIN32_WINNT_WIN8;
+	BOOL bExistProtectionInfo = g_nt_ver.Version >= _WIN32_WINNT_WIN8;
 
 	PROCESS_EXTENDED_BASIC_INFORMATION pebi = { sizeof(pebi) };
 
@@ -100,6 +99,9 @@ void els(PVOID Buf, WLog& log0, WLog& log)
 							break;
 						case PsProtectedSignerWinSystem:
 							signer = "WinSystem   ";
+							break;
+						case PsProtectedSignerApp:
+							signer = "App         ";
 							break;
 						default:
 							sprintf(szsigner, "%12u", ps.Signer);

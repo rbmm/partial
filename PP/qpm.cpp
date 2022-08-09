@@ -1,364 +1,666 @@
-#include "StdAfx.h"
+#include "stdafx.h"
 
+#include "..\NtVer\nt_ver.h"
 _NT_BEGIN
 
+#include "../tkn/tkn.h"
 #include "qpm.h"
-#define USER_SHARED_DATA ((PKUSER_SHARED_DATA)0x7ffe0000)
+
+HANDLE g_hDrv;
+
+void InitDriver()
+{
+	STATIC_UNICODE_STRING(tkn, "\\Registry\\Machine\\System\\CurrentControlSet\\Services\\{FC81D8A3-6002-44bf-931A-352B95C4522F}");
+
+	switch (ZwLoadDriver((PUNICODE_STRING)&tkn))
+	{
+	case 0:
+	case STATUS_IMAGE_ALREADY_LOADED:
+		IO_STATUS_BLOCK iosb;
+		STATIC_OBJECT_ATTRIBUTES(oa, "\\device\\69766781178D422cA183775611A8EE55");
+		NtOpenFile(&g_hDrv, SYNCHRONIZE, &oa, &iosb, FILE_SHARE_VALID_FLAGS, FILE_SYNCHRONOUS_IO_NONALERT);
+		break;
+	}
+}
+
+NTSTATUS DoIoControl(ULONG code)
+{
+	IO_STATUS_BLOCK iosb;
+	return g_hDrv ? NtDeviceIoControlFile(g_hDrv, 0, 0, 0, &iosb, code, 0, 0, 0, 0) : STATUS_INVALID_HANDLE;
+}
+
+NTSTATUS MyOpenProcess(PHANDLE ProcessHandle, ULONG DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes, PCLIENT_ID Cid)
+{
+	if (g_hDrv)
+	{
+		IO_STATUS_BLOCK iosb;
+		NTSTATUS status = NtDeviceIoControlFile(g_hDrv, 0, 0, 0, &iosb, IOCTL_OpenProcess, &Cid->UniqueProcess, sizeof(HANDLE), 0, 0);
+		*ProcessHandle = (HANDLE)iosb.Information;
+		return status;
+	}
+	return NtOpenProcess(ProcessHandle, DesiredAccess, ObjectAttributes, Cid);
+}
+
 #ifdef _WIN64
 
 #include "../wow/wow.h"
 
-PVOID g_LdrQueryProcessModuleInformationWow, g_RtlExitUserThreadWow;
+BEGIN_DLL_FUNCS(ntdll, 0)
+	FUNC(LdrQueryProcessModuleInformation),
+	FUNC(RtlExitUserThread),
+END_DLL_FUNCS();
 
-BEGIN_WOW_DLL(ntdll)
-	WOW_FUNC(LdrQueryProcessModuleInformation)
-	WOW_FUNC(RtlExitUserThread)
-END_HOOK()
-
-WOW_PROCS_BEGIN()
-	WOW_DLL(ntdll)
-END_HOOK()
-
-BOOL QUERY_PROCESS_MODULES::InitWow()
+void InitWow64()
 {
-	getWowProcs();
-	return g_LdrQueryProcessModuleInformationWow && g_RtlExitUserThreadWow;
+	DLL_LIST_0::Process(&ntdll);
 }
 
 #endif
 
-NTSTATUS
-GetProcessMitigationPolicy(
-						   _In_ HANDLE hProcess,
-						   _In_ PROCESS_MITIGATION_POLICY MitigationPolicy,
-						   _Out_writes_bytes_(ULONG) PVOID lpBuffer
-						   )
+BOOLEAN IsExportSuppressionEnabled(HANDLE hProcess);
+NTSTATUS SetExportValid(HANDLE hProcess, LPCVOID pv1, LPCVOID pv2);
+
+struct THREAD_INFO  
 {
-	struct PROCESS_MITIGATION {
-		PROCESS_MITIGATION_POLICY Policy;
-		ULONG Flags;
+	union {
+		HANDLE hProcess;
+		struct  
+		{
+			ULONG_PTR IsWow64Process : 1;
+			ULONG_PTR ExportSuppressed : 1;
+		};
 	};
 
-	PROCESS_MITIGATION m = { MitigationPolicy };
-	NTSTATUS status = NtQueryInformationProcess(hProcess, ProcessMitigationPolicy, &m, sizeof(m), 0);
-	if (0 <= status)
+	union {
+		HANDLE hThread;
+		struct  
+		{
+			ULONG_PTR IsWow64Thread : 1;
+		};
+	};
+
+	PVOID RemoteViewBase;
+	PSYSTEM_PROCESS_INFORMATION pspi;
+
+	void Cleanup()
 	{
-		*(PULONG)lpBuffer = m.Flags;
+		ZwUnmapViewOfSection(hProcess, RemoteViewBase), RemoteViewBase = 0;
+		NtClose(hProcess), hProcess = 0;
+	}
+};
+
+ULONG FormatWaitArray(_In_ THREAD_INFO* pta, ULONG n, _Out_ PHANDLE lpHandles, _Out_ PULONG Indexes)
+{
+	ULONG nCount = 0, i = 0;
+	do 
+	{
+		if (HANDLE hThread = pta++->hThread)
+		{
+			*Indexes++ = i, *lpHandles++ = hThread, nCount++;
+		}
+	} while (i++, --n);
+
+	return nCount;
+}
+
+struct NAME_EX 
+{
+	union {
+		ULONG Value;
+		ULONG offset : 24;
+		struct {
+			UCHAR pad[3];
+			UCHAR count;
+		};
+	};
+	CHAR buf[];
+};
+
+C_ASSERT(sizeof(NAME_EX)==4);
+
+ULONG GetLoadCount(PROCESS_MODULE* pm)
+{
+	return CONTAINING_RECORD(pm->FullPathName, NAME_EX, buf)->count;
+}
+
+PROCESS_MODULE* PROCESS_MODULE::Init(NAMES* Table, ULONG i, PVOID Base, ULONG Size, PSTR Name)
+{
+	ImageBase = Base;
+	ImageSize = Size;
+	Index = i;
+
+	NAME_EX* p = CONTAINING_RECORD(Name, NAME_EX, buf);
+
+	ULONG len = FIELD_OFFSET(NAME_EX, buf[strlen(Name) + 1]);
+
+	p->Value = RtlPointerToOffset(Table->TableContext, this);
+	Name = 0;
+
+	if (p = (NAME_EX*)RtlInsertElementGenericTableAvl(Table, p, len, 0))
+	{
+		p->count++;
+		Name = p->buf;
+
+		Table->IncModulesCount();
+	}
+
+	FullPathName = Name;
+
+	return this + 1;
+}
+
+BOOL NAMES::Create(ULONG size)
+{
+	if (PVOID pv = VirtualAlloc(0, size, MEM_COMMIT, PAGE_READWRITE))
+	{
+		Init(pv);
+		_cbFree = size;
+
 		return TRUE;
 	}
 
-	return status;
+	return FALSE;
 }
 
-bool IsExportSuppressionEnabled(HANDLE hProcess)
+PCSTR NAMES::GetCommandLine(HANDLE hProcess)
 {
-	PROCESS_MITIGATION_CONTROL_FLOW_GUARD_POLICY cfg;
-
-	return 0 <= GetProcessMitigationPolicy(hProcess, ProcessControlFlowGuardPolicy, &cfg) &&
-		cfg.EnableControlFlowGuard && cfg.EnableExportSuppression;
-}
-
-BOOL WINAPI SetProcessValidCallTargetsTemp(
-	_In_ HANDLE hProcess,
-	_In_ PVOID VirtualAddress,
-	_In_ SIZE_T RegionSize,
-	_In_ ULONG NumberOfOffsets,
-	_Inout_updates_(NumberOfOffsets) PCFG_CALL_TARGET_INFO OffsetInformation
-	);
-
-BOOL (WINAPI * SetProcessValidCallTargets)(
-	_In_ HANDLE hProcess,
-	_In_ PVOID VirtualAddress,
-	_In_ SIZE_T RegionSize,
-	_In_ ULONG NumberOfOffsets,
-	_Inout_updates_(NumberOfOffsets) PCFG_CALL_TARGET_INFO OffsetInformation
-	) = SetProcessValidCallTargetsTemp;
-
-BOOL WINAPI SetProcessValidCallTargetsTemp(
-	_In_ HANDLE hProcess,
-	_In_ PVOID VirtualAddress,
-	_In_ SIZE_T RegionSize,
-	_In_ ULONG NumberOfOffsets,
-	_Inout_updates_(NumberOfOffsets) PCFG_CALL_TARGET_INFO OffsetInformation
-	)
-{
-	if (PVOID pv = GetProcAddress(GetModuleHandle(L"Kernelbase"), "SetProcessValidCallTargets"))
+	if (g_nt_ver.Version >= _WIN32_WINNT_WINBLUE)
 	{
-		(void*&)SetProcessValidCallTargets = pv;
-		return SetProcessValidCallTargets(hProcess, VirtualAddress, RegionSize, NumberOfOffsets, OffsetInformation);
-	}
-	else return FALSE;
-}
-
-NTSTATUS SetExportValid(HANDLE hProcess, LPCVOID pv)
-{
-	MEMORY_BASIC_INFORMATION mbi;
-
-	NTSTATUS status = NtQueryVirtualMemory(hProcess, (void*)pv, MemoryBasicInformation, &mbi, sizeof(mbi), 0);
-
-	if (0 <= status)
-	{
-		if (mbi.State != MEM_COMMIT || mbi.Type != MEM_IMAGE)
+		if (ULONG cb = _cbFree)
 		{
-			return STATUS_INVALID_ADDRESS;
-		}
+			union {
+				PSTR psz;
+				POBJECT_NAME_INFORMATION poni;
+			};
 
-		CFG_CALL_TARGET_INFO OffsetInformation = {
-			(ULONG_PTR)pv - (ULONG_PTR)mbi.BaseAddress,
-			CFG_CALL_TARGET_CONVERT_EXPORT_SUPPRESSED_TO_VALID | CFG_CALL_TARGET_VALID
+			psz = RtlOffsetToPointer(TableContext, _cbUsed);
+
+			if (0 <= NtQueryInformationProcess(hProcess, ProcessCommandLineInformation, poni, cb, 0))
+			{
+				if (cb = WideCharToMultiByte(CP_UTF8, 0, poni->Name.Buffer, poni->Name.Length >> 1, psz, cb - 1, 0, 0))
+				{
+					psz[cb] = 0;
+
+					cb = (cb + __alignof(PVOID)) & ~(__alignof(PVOID) - 1);
+
+					_cbFree -= cb, _cbUsed += cb;
+
+					return psz;
+				}
+			}
+		}
+	}
+
+	return 0;
+}
+
+PSYSTEM_PROCESS_INFORMATION NAMES::BuildListOfProcesses()
+{
+	union {
+		PVOID buf;
+		PSYSTEM_PROCESS_INFORMATION pspi;
+	};
+
+	buf = RtlOffsetToPointer(TableContext, _cbUsed);
+	ULONG cb;
+
+	if (0 <= NtQuerySystemInformation(SystemProcessInformation, buf, _cbFree, &cb))
+	{
+		cb = (cb + __alignof(PVOID) - 1) & ~(__alignof(PVOID) - 1);
+
+		_cbFree -= cb, _cbUsed += cb;
+
+		return pspi;
+	}
+
+	return 0;
+}
+
+void NAMES::FillModules(PROCESS_MODULE** ppm)
+{
+	PVOID Key = 0;
+	PVOID BaseAddress = TableContext;
+
+	while(NAME_EX* ptr = (NAME_EX*)RtlEnumerateGenericTableWithoutSplayingAvl(this, &Key))
+	{
+		*ppm++ = (PROCESS_MODULE*)RtlOffsetToPointer(BaseAddress, ptr->offset);
+	}
+}
+
+PVOID NTAPI NAMES::alloc (_In_ PRTL_AVL_TABLE Table, _In_ CLONG ByteSize)
+{
+	ULONG cbFree = static_cast<NAMES*>(Table)->_cbFree;
+
+	if ((ULONG)(ByteSize = (ByteSize + __alignof(PVOID) - 1) & ~(__alignof(PVOID) - 1)) < cbFree)
+	{
+		PVOID pv = (PBYTE)Table->TableContext + static_cast<NAMES*>(Table)->_cbUsed;
+
+		static_cast<NAMES*>(Table)->_cbFree -= ByteSize;
+		static_cast<NAMES*>(Table)->_cbUsed += ByteSize;
+
+		return pv;
+	}
+
+	return 0;
+}
+
+RTL_GENERIC_COMPARE_RESULTS NTAPI NAMES::compare (_In_ PRTL_AVL_TABLE , _In_ PVOID FirstStruct, _In_ PVOID SecondStruct)
+{
+	int i = strcmp(reinterpret_cast<NAME_EX*>(FirstStruct)->buf, reinterpret_cast<NAME_EX*>(SecondStruct)->buf);
+	if (0 > i) return GenericLessThan;
+	if (0 < i) return GenericGreaterThan;
+	return GenericEqual;
+}
+
+PVOID NAMES::AllocPM(_In_ PRTL_PROCESS_MODULES mods, _In_opt_ PRTL_PROCESS_MODULES32 mods32, _Out_ PULONG pNumberOfModules)
+{
+	ULONG NumberOfModules = mods->NumberOfModules;
+
+	if (mods32)
+	{
+		NumberOfModules += mods32->NumberOfModules;
+	}
+
+	if (PROCESS_MODULE* ppm = (PROCESS_MODULE*)alloc(this, NumberOfModules * sizeof(PROCESS_MODULE)))
+	{
+		PVOID buf = ppm;
+
+		*pNumberOfModules = NumberOfModules;
+
+		union {
+			PRTL_PROCESS_MODULE_INFORMATION Modules;
+			PRTL_PROCESS_MODULE_INFORMATION32 Modules32;
 		};
 
-		return SetProcessValidCallTargets(hProcess, mbi.BaseAddress, mbi.RegionSize, 1, &OffsetInformation) &&
-			(OffsetInformation.Flags & CFG_CALL_TARGET_PROCESSED) ? STATUS_SUCCESS : STATUS_STRICT_CFG_VIOLATION;
+		ULONG i = 0;
+		if (NumberOfModules = mods->NumberOfModules)
+		{
+			Modules = mods->Modules;
+
+			do 
+			{
+				ppm = ppm->Init(this, i++, Modules->ImageBase, Modules->ImageSize, Modules->FullPathName);
+
+			} while (Modules++, --NumberOfModules);
+		}
+
+		if (mods32)
+		{
+			if (NumberOfModules = mods32->NumberOfModules)
+			{
+				Modules32 = mods32->Modules;
+
+				do 
+				{
+					ppm = ppm->Init(this, i++, (PVOID)(ULONG_PTR)Modules32->ImageBase, Modules32->ImageSize, Modules32->FullPathName);
+
+				} while (Modules32++, --NumberOfModules);
+			}
+		}
+
+		return buf;
 	}
 
-	return status;
+	return 0;
 }
 
-NTSTATUS SetExportValid(HANDLE hProcess, LPCVOID pv1, LPCVOID pv2)
+extern OBJECT_ATTRIBUTES zoa;
+
+ULONG Process( PRTL_PROCESS_MODULES mods, ULONG Size)
 {
-	MEMORY_BASIC_INFORMATION mbi;
+	if (ULONG NumberOfModules = mods->NumberOfModules)
+	{
+		if (Size == __builtin_offsetof(RTL_PROCESS_MODULES, Modules) + NumberOfModules * sizeof(RTL_PROCESS_MODULE_INFORMATION))
+		{
+			PRTL_PROCESS_MODULE_INFORMATION Modules = mods->Modules;
+			do 
+			{
+				_strlwr(Modules->FullPathName);
+			} while (Modules++, --NumberOfModules);
+
+			return Size;
+		}
+		else
+		{
+			mods->NumberOfModules = 0;
+		}
+	}
+
+	return sizeof(PVOID);
+}
+
+ULONG Process( PRTL_PROCESS_MODULES32 mods, ULONG Size)
+{
+	if (ULONG NumberOfModules = mods->NumberOfModules)
+	{
+		if (Size == __builtin_offsetof(RTL_PROCESS_MODULES32, Modules) + NumberOfModules * sizeof(RTL_PROCESS_MODULE_INFORMATION32))
+		{
+			CHAR SysDir[64];
+			ULONG cch = GetSystemDirectoryA(SysDir, _countof(SysDir));
+			static const CHAR system32[] = "\\system32\\";
+			static const CHAR wow64[] = "wow64";
+			_strlwr(SysDir);
+
+			PRTL_PROCESS_MODULE_INFORMATION32 Modules = mods->Modules;
+			do 
+			{
+				PSTR FullPathName = _strlwr(Modules->FullPathName);
+				if (_countof(system32) < cch)
+				{
+					if (!memcmp(FullPathName, SysDir, cch) &&
+						!memcmp(FullPathName += cch - _countof(system32) + 2, system32, _countof(system32) - 1))
+					{
+						memcpy(FullPathName + _countof("\\sys") - 1, wow64, _countof(wow64) - 1);
+					}
+				}
+			} while (Modules++, --NumberOfModules);
+
+			return Size;
+		}
+		else
+		{
+			mods->NumberOfModules = 0;
+		}
+	}
+
+	return sizeof(PVOID);
+}
+
+NTSTATUS StartQuery(
+					_In_ HANDLE hProcess,
+					_In_ PVOID RemoteBaseAddress,
+					_In_ ULONG Size,
+					_In_ BOOLEAN ExportSuppression,
+#ifdef _WIN64
+					_In_ BOOL wow,
+#endif
+					_Out_ THREAD_INFO* pta 
+					)
+{
+	PVOID pvLdrQueryProcessModuleInformation;
+	PVOID pvRtlExitUserThread;
+	NTSTATUS (NTAPI *QueueApcThread)(HANDLE hThread, PKNORMAL_ROUTINE , PVOID , PVOID , PVOID );
+
+#ifdef _WIN64
+	if (wow)
+	{
+		pvLdrQueryProcessModuleInformation = ntdll.funcs[0].pv;
+		pvRtlExitUserThread = ntdll.funcs[1].pv;
+		QueueApcThread = RtlQueueApcWow64Thread;
+	}
+	else
+#endif
+	{
+		pvLdrQueryProcessModuleInformation = LdrQueryProcessModuleInformation;
+		pvRtlExitUserThread = RtlExitUserThread;
+		QueueApcThread = ZwQueueApcThread;
+	}
 
 	NTSTATUS status;
 
-	if (0 <= (status = NtQueryVirtualMemory(hProcess, (void*)pv1, MemoryBasicInformation, &mbi, sizeof(mbi), 0)))
+	if (ExportSuppression)
 	{
-		if (mbi.State != MEM_COMMIT || mbi.Type != MEM_IMAGE)
+		if (0 > (status = SetExportValid(hProcess, pvLdrQueryProcessModuleInformation, pvRtlExitUserThread)))
 		{
-			return STATUS_INVALID_ADDRESS;
+			return status;
+		}
+	}
+
+	HANDLE hThread;
+	if (0 <= (status = RtlCreateUserThread(hProcess, 0, TRUE, 0, 0, 0, pvRtlExitUserThread, 0, &hThread, 0)))
+	{
+		if (0 <= (status = QueueApcThread(hThread, 
+			(PKNORMAL_ROUTINE)pvLdrQueryProcessModuleInformation, 
+			RemoteBaseAddress, 
+			(PVOID)(ULONG_PTR)Size, 
+			(PBYTE)RemoteBaseAddress + Size)))
+		{
+			NtSetInformationThread(hThread, ThreadHideFromDebugger, 0, 0);
+
+			if (0 <= (status = ZwResumeThread(hThread, 0)))
+			{
+				pta->hThread = hThread;
+#ifdef _WIN64
+				pta->IsWow64Thread = wow;
+#endif
+				pta->RemoteViewBase = RemoteBaseAddress;
+
+				return STATUS_SUCCESS;
+			}
 		}
 
-		CFG_CALL_TARGET_INFO OffsetInformation[] = {
-			{ (ULONG_PTR)pv1 - (ULONG_PTR)mbi.BaseAddress,
-			CFG_CALL_TARGET_CONVERT_EXPORT_SUPPRESSED_TO_VALID | CFG_CALL_TARGET_VALID},
-			{ (ULONG_PTR)pv2 - (ULONG_PTR)mbi.BaseAddress,
-			CFG_CALL_TARGET_CONVERT_EXPORT_SUPPRESSED_TO_VALID | CFG_CALL_TARGET_VALID},
-		};
-
-		if ((ULONG_PTR)pv2 - (ULONG_PTR)mbi.BaseAddress < mbi.RegionSize)
-		{
-			return SetProcessValidCallTargets(hProcess, mbi.BaseAddress, mbi.RegionSize, 2, OffsetInformation) &&
-				(OffsetInformation[0].Flags & CFG_CALL_TARGET_PROCESSED) &&
-				(OffsetInformation[1].Flags & CFG_CALL_TARGET_PROCESSED)? STATUS_SUCCESS : STATUS_STRICT_CFG_VIOLATION;
-		}
-
-		if (!SetProcessValidCallTargets(hProcess, mbi.BaseAddress, mbi.RegionSize, 1, OffsetInformation) ||
-			!(OffsetInformation[0].Flags & CFG_CALL_TARGET_PROCESSED))
-		{
-			return STATUS_STRICT_CFG_VIOLATION;
-		}
-
-		return SetExportValid(hProcess, pv2);
+		ZwTerminateThread(hThread, 0);
+		NtClose(hThread);
 	}
 
 	return status;
 }
 
-static OBJECT_ATTRIBUTES zoa = { sizeof(zoa) };
-
-QUERY_PROCESS_MODULES::QUERY_PROCESS_MODULES()
+void NAMES::QueryLoop(
+					  _In_ PSYSTEM_PROCESS_INFORMATION pspi, 
+					  _In_ HANDLE hSection, 
+					  _In_ PVOID BaseAddress
+					  )
 {
-	_psmi = 0;
-	_hSection = 0;
-}
+	THREAD_INFO ta[MaxThreads] {}, *pta;
+	HANDLE hThreads[MaxThreads];
+	ULONG Indexes[MaxThreads]; // hThreads -> ta
+	CLIENT_ID cid = { };
 
-QUERY_PROCESS_MODULES::~QUERY_PROCESS_MODULES()
-{
-	if (_hSection)
+	LONG Mask = ~0;/* 1 - THREAD_INFO is free */
+	ULONG Index;
+
+	ULONG NextEntryOffset = 0;
+
+#ifdef _WIN64
+	BOOL bWowInit = (ntdll.funcs[0].pv && ntdll.funcs[1].pv);
+#endif
+
+	struct QueryBuf 
 	{
-		if (_psmi)
+		ULONG NumberOfModules;
+		UCHAR buf[secsize - 2 * sizeof(ULONG)];
+		ULONG ReturnedSize;
+	};
+
+	union {
+		void* LocalBaseAddress;
+		ULONG_PTR up;
+		QueryBuf* pQb;
+		RTL_PROCESS_MODULES* mods;
+		RTL_PROCESS_MODULES32* mods32;
+	};
+
+	ULONG ReturnedSize;
+
+	do 
+	{
+		if (_BitScanForward(&Index, Mask))
 		{
-			ZwUnmapViewOfSection(NtCurrentProcess(), _psmi);
-			_psmi = 0;
-		}
-		NtClose(_hSection);
-	}
+			(ULONG_PTR&)pspi += NextEntryOffset;
 
-	if (_psmi)
-	{
-		delete _psmi;
-	}
-}
-
-NTSTATUS QUERY_PROCESS_MODULES::create(PRTL_PROCESS_MODULES psmi)
-{
-	if (ULONG NumberOfModules = psmi->NumberOfModules)
-	{
-		ULONG n = 0;
-		PRTL_PROCESS_MODULE_INFORMATION Modules = psmi->Modules, _Modules;
-		do 
-		{
-			if (0 > (INT_PTR)Modules++->ImageBase)
+			if (!(cid.UniqueProcess = pspi->UniqueProcessId))
 			{
-				n++;
+				continue;
 			}
 
-		} while (--NumberOfModules);
+			LARGE_INTEGER SectionOffset = { Index << secshift };
+			LocalBaseAddress = RtlOffsetToPointer(BaseAddress, SectionOffset.LowPart);
 
-		if (n)
-		{
-			if (_psmi = (PRTL_PROCESS_MODULES)new UCHAR[FIELD_OFFSET(RTL_PROCESS_MODULES, Modules[n])])
+			NTSTATUS status;
+			HANDLE hProcess;
+
+			if (pspi->InheritedFromUniqueProcessId)
 			{
-				NumberOfModules = psmi->NumberOfModules;
-				Modules = psmi->Modules;
-				_Modules = _psmi->Modules;
-				_psmi->NumberOfModules = n;
-				do 
+				if (0 <= (status = MyOpenProcess(&hProcess, 
+					PROCESS_VM_OPERATION|PROCESS_CREATE_THREAD|PROCESS_QUERY_INFORMATION|PROCESS_SET_INFORMATION, &zoa, &cid)))
 				{
-					if (0 > (INT_PTR)Modules->ImageBase)
+					set_cmdline(pspi, GetCommandLine(hProcess));
+
+					PROCESS_EXTENDED_BASIC_INFORMATION pebi;
+					if (0 <= (status = NtQueryInformationProcess(hProcess, ProcessBasicInformation, &pebi, sizeof(pebi), 0)))
 					{
-						*_Modules++ = *Modules;
+						set_Flags(pspi, pebi.Flags);
+
+						if (!pebi.IsFrozen && !pebi.IsProcessDeleting)
+						{
+							BOOLEAN ExportSuppression = IsExportSuppressionEnabled(hProcess);
+
+							pta = ta + Index;
+							pta->pspi = pspi;
+
+							pta->hProcess = hProcess;
+#ifdef _WIN64
+							pta->IsWow64Process = bWowInit && pebi.IsWow64Process;
+#endif
+							pta->ExportSuppressed = ExportSuppression;
+
+							pQb->NumberOfModules = 0;
+							pQb->ReturnedSize = 0;
+
+							PVOID RemoteBaseAddress = 0;
+							SIZE_T ViewSize = secsize;
+
+							if (0 <= (status = ZwMapViewOfSection(hSection, hProcess, &RemoteBaseAddress, 0, 
+								secsize, &SectionOffset, &ViewSize, ViewUnmap, 0, PAGE_READWRITE)))
+							{
+								if (0 <= (status = StartQuery(hProcess, RemoteBaseAddress, 
+									secsize - sizeof(ULONG), 
+									ExportSuppression, 
+#ifdef _WIN64
+									FALSE, 
+#endif
+									pta)))
+								{
+									_bittestandreset(&Mask, Index);
+									continue;
+								}
+
+								ZwUnmapViewOfSection(hProcess, RemoteBaseAddress);
+							}
+
+							pta->hProcess = 0, pta->pspi = 0;
+						}
+						else
+						{
+							status = STATUS_CANCELLED;
+						}
 					}
 
-				} while (Modules++, --NumberOfModules);
-
-				return 0;
+					NtClose(hProcess);
+				}
+				else if (status == STATUS_ACCESS_DENIED)
+				{
+					if (0 <= NtOpenProcess(&hProcess, PROCESS_QUERY_LIMITED_INFORMATION, &zoa, &cid))
+					{
+						set_cmdline(pspi, GetCommandLine(hProcess));
+						NtClose(hProcess);
+					}
+				}
 			}
 			else
 			{
-				return STATUS_INSUFFICIENT_RESOURCES;
-			}
-		}
-	}
-
-	return STATUS_NO_MORE_ENTRIES;
-}
-
-NTSTATUS QUERY_PROCESS_MODULES::create()
-{
-	static LARGE_INTEGER SectionSize = { 2*secsize };
-
-	NTSTATUS status;
-	HANDLE hSection;
-
-	if (0 <= (status = ZwCreateSection(&hSection, SECTION_ALL_ACCESS, 0, &SectionSize, PAGE_READWRITE, SEC_COMMIT, 0)))
-	{
-		PVOID BaseAddress = 0;
-		SIZE_T ViewSize = 0;
-
-		if (0 <= (status = ZwMapViewOfSection(hSection, NtCurrentProcess(), &BaseAddress, 0, 0, 0, &ViewSize, ViewUnmap, 0, PAGE_READWRITE)))
-		{
-			_psmi = (PRTL_PROCESS_MODULES)BaseAddress;
-			_hSection = hSection;
-
-			return 0;
-		}
-
-		NtClose(hSection);
-	}
-
-	return status;
-}
-
-NTSTATUS MyOpenProcess(PHANDLE ProcessHandle, ULONG DesiredAccess, POBJECT_ATTRIBUTES ObjectAttributes, PCLIENT_ID Cid);
-
-NTSTATUS QUERY_PROCESS_MODULES::query(HANDLE UniqueProcess)
-{
-	HANDLE hProcess, hThread;
-
-	CLIENT_ID cid = { UniqueProcess };
-
-	NTSTATUS status;
-
-	RtlZeroMemory(_psmi, 2*secsize);
-
-	if (0 <= (status = MyOpenProcess(&hProcess, PROCESS_ALL_ACCESS_XP, &zoa, &cid)))
-	{
-		bool ExportSuppression = IsExportSuppressionEnabled(hProcess);
-
-		PVOID RemoteBaseAddress = 0;
-		SIZE_T ViewSize = 0;
-		static LARGE_INTEGER timeout = { (ULONG)-20000000, -1};// 2 sec
-
-		if (0 <= (status = ZwMapViewOfSection(_hSection, hProcess, &RemoteBaseAddress, 0, 0, 0, &ViewSize, ViewUnmap, 0, PAGE_READWRITE)))
-		{
-			if (!ExportSuppression || (0 <= (status = SetExportValid(hProcess, LdrQueryProcessModuleInformation, RtlExitUserThread))))
-			{
-				if (0 <= (status = RtlCreateUserThread(hProcess, 0, TRUE, 0, 0, 0, RtlExitUserThread, 0, &hThread, 0)))
+				if (0 <= (status = NtQuerySystemInformation(SystemModuleInformation, LocalBaseAddress, secsize, &ReturnedSize)))
 				{
-					ZwQueueApcThread(hThread, (PKNORMAL_ROUTINE)LdrQueryProcessModuleInformation, 
-						RemoteBaseAddress, 
-						(PVOID)(secsize - sizeof(ULONG)), 
-						(PBYTE)RemoteBaseAddress + secsize - sizeof(ULONG));
-
-					ZwSetInformationThread(hThread, ThreadHideFromDebugger, 0, 0);
-
-					ZwResumeThread(hThread, 0);
-
-					if ((status = ZwWaitForSingleObject(hThread, FALSE, &timeout)) == STATUS_TIMEOUT)
+					if (ReturnedSize = Process(mods, ReturnedSize))
 					{
-						ZwTerminateThread(hThread, STATUS_ABANDONED);
-					}
-
-					NtClose(hThread);
-				}
-			}
-
-#ifdef _WIN64
-			PVOID wow;
-
-			if (
-				0 <= status && status != STATUS_TIMEOUT &&
-				0 <= ZwQueryInformationProcess(hProcess, ProcessWow64Information, &wow, sizeof(wow), 0) && wow &&
-				g_LdrQueryProcessModuleInformationWow && g_RtlExitUserThreadWow &&
-				(!ExportSuppression || (0 <= SetExportValid(hProcess, g_LdrQueryProcessModuleInformationWow, g_RtlExitUserThreadWow)))
-				)
-			{
-				if (0 <= RtlCreateUserThread(hProcess, 0, TRUE, 0, 0, 0, (void*)g_RtlExitUserThreadWow, 0, &hThread, 0))
-				{
-					RtlQueueApcWow64Thread(hThread, (PKNORMAL_ROUTINE)g_LdrQueryProcessModuleInformationWow, 
-						RtlOffsetToPointer(RemoteBaseAddress, secsize), 
-						(PVOID)(secsize - sizeof(ULONG)), 
-						(PBYTE)RemoteBaseAddress + 2*secsize - sizeof(ULONG));
-					ZwSetInformationThread(hThread, ThreadHideFromDebugger, 0, 0);
-					ZwResumeThread(hThread, 0);
-					if ((status = ZwWaitForSingleObject(hThread, FALSE, &timeout)) == STATUS_TIMEOUT)
-					{
-						ZwTerminateThread(hThread, STATUS_ABANDONED);
-					}
-					NtClose(hThread);
-				}
-
-				if (0 <= status && status != STATUS_TIMEOUT)
-				{
-					PRTL_PROCESS_MODULES32 psmi = (PRTL_PROCESS_MODULES32)RtlOffsetToPointer(_psmi, secsize);
-
-					if (ULONG NumberOfModules = psmi->NumberOfModules)
-					{
-						if (--NumberOfModules)
+						if (LocalBaseAddress = AllocPM(mods, 0, &ReturnedSize))
 						{
-							PRTL_PROCESS_MODULE_INFORMATION32 Modules = psmi->Modules + 1;
-
-							PRTL_PROCESS_MODULES psmi0 = _psmi;
-							PRTL_PROCESS_MODULE_INFORMATION _Modules = psmi0->Modules + psmi0->NumberOfModules;
-							psmi0->NumberOfModules += NumberOfModules;
-
-							do 
-							{
-								_Modules->Flags = Modules->Flags;
-								_Modules->ImageBase = (PVOID)Modules->ImageBase;
-								_Modules->ImageSize = Modules->ImageSize;
-								_Modules->InitOrderIndex = Modules->InitOrderIndex;
-								_Modules->LoadCount = Modules->LoadCount;
-								_Modules->LoadOrderIndex = Modules->LoadOrderIndex;
-								_Modules->MappedBase = (PVOID)Modules->MappedBase;
-								_Modules->OffsetToFileName = Modules->OffsetToFileName;
-								_Modules->Section = (PVOID)Modules->Section;
-								memcpy(_Modules->FullPathName, Modules->FullPathName, 256);
-							} while (_Modules++, Modules++, --NumberOfModules);
+							set_modules(pspi, up, ReturnedSize);
 						}
 					}
 				}
-
 			}
+
+			set_status(pspi, status);
+		}
+		else
+		{
+			do 
+			{
+__0:
+				LARGE_INTEGER Timeout = { (ULONG)-10000000, -1 };
+				Index = ZwWaitForMultipleObjects(FormatWaitArray(ta, _countof(ta), hThreads, Indexes), hThreads, WaitAny, TRUE, &Timeout);
+
+				if (Index > MaxThreads)
+				{
+					goto __1;
+				}
+
+				pta = &ta[Index = Indexes[Index]];
+				PVOID buf = LocalBaseAddress = RtlOffsetToPointer(BaseAddress, Index << secshift);
+
+				NtClose(pta->hThread);
+
+				ReturnedSize = pQb->ReturnedSize;
+
+				up += (ULONG_PTR)pta->RemoteViewBase & 0xFFFF;
+				ReturnedSize = pta->IsWow64Thread ? Process(mods32, ReturnedSize) : Process(mods, ReturnedSize);
+				pta->hThread = 0;
+
+#ifdef _WIN64
+				if (pta->IsWow64Process)
+				{
+					pta->IsWow64Process = 0;
+
+					if (ReturnedSize <= 0x10000 - sizeof(ULONG))
+					{
+						if (0 <= StartQuery(pta->hProcess, (PBYTE&)pta->RemoteViewBase += ReturnedSize, 
+							secsize - ReturnedSize - sizeof(ULONG), pta->ExportSuppressed, TRUE, pta))
+						{
+							goto __0;
+						}
+					}
+				}
 #endif
-			ZwUnmapViewOfSection(hProcess, RemoteBaseAddress);
+
+				pta->Cleanup();
+				_bittestandset(&Mask, Index);
+
+				if (ReturnedSize)
+				{
+					set_status(pta->pspi, STATUS_SUCCESS);
+
+					if (buf == LocalBaseAddress)
+					{
+						LocalBaseAddress = AllocPM(mods, 0, &ReturnedSize);
+					}
+					else
+					{
+						LocalBaseAddress = AllocPM((PRTL_PROCESS_MODULES)buf, mods32, &ReturnedSize);
+					}
+
+					if (LocalBaseAddress)
+					{
+						set_modules(pta->pspi, up, ReturnedSize);
+					}
+				}
+
+			} while (!_BitScanForward(&Index, Mask));
 		}
 
-		NtClose(hProcess);
+	} while (NextEntryOffset = pspi->NextEntryOffset);
+
+	while (Mask != ~0)
+	{
+		goto __0;
 	}
 
-	return status;
+__1:
+
+	Index = MaxThreads;
+	pta = ta;
+	do 
+	{
+		if (HANDLE hThread = pta->hThread)
+		{
+			ZwTerminateThread(hThread, 0);
+			NtClose(hThread);
+			set_status(pta->pspi, STATUS_UNSUCCESSFUL);
+			pta->Cleanup();
+		}
+
+	} while (pta++, --Index);
 }
 
 _NT_END

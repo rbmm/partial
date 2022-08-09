@@ -172,7 +172,7 @@ void els3(WLog& log, PVOID buf)
 
 				WCHAR sz[] = L".... ... ..... ...";
 
-				if (GetProcessMitigationPolicy(hProcess, ProcessSignaturePolicy, &dcp))
+				if (GetProcessMitigationPolicy(hProcess, ProcessDynamicCodePolicy, &dcp))
 				{
 					if (dcp.ProhibitDynamicCode) sz[0] = '#';
 					if (dcp.AllowThreadOptOut) sz[1] = '#';

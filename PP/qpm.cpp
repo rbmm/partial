@@ -502,7 +502,15 @@ void NAMES::QueryLoop(
 					{
 						set_Flags(pspi, pebi.Flags);
 
-						if (!pebi.IsFrozen && !pebi.IsProcessDeleting)
+						if (pebi.IsProcessDeleting)
+						{
+							status = STATUS_PROCESS_IS_TERMINATING;
+						}
+						else if (pebi.IsFrozen && pebi.IsStronglyNamed)
+						{
+							status = STATUS_INVALID_DEVICE_STATE;
+						}
+						else
 						{
 							BOOLEAN ExportSuppression = IsExportSuppressionEnabled(hProcess);
 
@@ -540,10 +548,6 @@ void NAMES::QueryLoop(
 							}
 
 							pta->hProcess = 0, pta->pspi = 0;
-						}
-						else
-						{
-							status = STATUS_CANCELLED;
 						}
 					}
 

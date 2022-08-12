@@ -142,7 +142,7 @@ NTSTATUS QueryPM(_In_ HANDLE dwProcessId, _Out_ PRTL_PROCESS_MODULES* pmods)
 
 	if (0 <= status)
 	{
-		PROCESS_EXTENDED_BASIC_INFORMATION pebi;
+		PROCESS_EXTENDED_BASIC_INFORMATION pebi = {sizeof(pebi)};
 
 		if (0 <= (status = NtQueryInformationProcess(hProcess, ProcessBasicInformation, &pebi, sizeof(pebi), 0)))
 		{

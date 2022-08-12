@@ -497,7 +497,7 @@ void NAMES::QueryLoop(
 				{
 					set_cmdline(pspi, GetCommandLine(hProcess));
 
-					PROCESS_EXTENDED_BASIC_INFORMATION pebi;
+					PROCESS_EXTENDED_BASIC_INFORMATION pebi = {sizeof(pebi)};
 					if (0 <= (status = NtQueryInformationProcess(hProcess, ProcessBasicInformation, &pebi, sizeof(pebi), 0)))
 					{
 						set_Flags(pspi, pebi.Flags);

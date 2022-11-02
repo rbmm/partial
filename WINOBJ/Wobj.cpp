@@ -330,7 +330,7 @@ int CALLBACK CompareFunc(OBJ_NODE* p, OBJ_NODE* q, int iSubItem)
 	return RtlCompareUnicodeString(pus1, pus2, FALSE);
 }
 
-class MySplit : public ZSplitWndV
+class MySplit : public ZSplitWnd
 {
 	UNICODE_STRING m_TypeNames[64];
 	HICON m_hi[32];
@@ -474,7 +474,7 @@ class MySplit : public ZSplitWndV
 
 		if (lt)
 		{
-			if (hwnd = CreateWindowExW(0, WC_TREEVIEW, 0, WS_CHILD|WS_VISIBLE|
+			if (hwnd = CreateWindowExW(0, WC_TREEVIEW, 0, WS_CHILD|WS_BORDER|WS_VISIBLE|
 				TVS_LINESATROOT|TVS_HASLINES|TVS_HASBUTTONS|TVS_DISABLEDRAGDROP|
 				TVS_TRACKSELECT|TVS_EDITLABELS, x, y, nWidth, nHeight, hwndParent, (HMENU)1, 0, 0))
 			{
@@ -489,7 +489,7 @@ class MySplit : public ZSplitWndV
 		else
 		{
 			if (hwnd = CreateWindowExW(0, WC_LISTVIEW, 0, 
-				WS_VISIBLE|WS_CHILD|LVS_REPORT|LVS_SHOWSELALWAYS|LVS_SHAREIMAGELISTS|LVS_SINGLESEL|WS_HSCROLL|WS_VSCROLL,
+				WS_VISIBLE|WS_CHILD|WS_BORDER|LVS_REPORT|LVS_SHOWSELALWAYS|LVS_SHAREIMAGELISTS|LVS_SINGLESEL|WS_HSCROLL|WS_VSCROLL,
 				x, y, nWidth, nHeight, hwndParent, (HMENU)2, 0, 0))
 			{
 				SetWindowTheme(hwnd, L"Explorer", 0);
@@ -865,7 +865,7 @@ __setitem:
 			}
 			break;
 		}
-		return ZSplitWndV::WindowProc(hwnd, uMsg, wParam, lParam);
+		return ZSplitWnd::WindowProc(hwnd, uMsg, wParam, lParam);
 	}
 
 public:
@@ -919,7 +919,7 @@ public:
 		m_item = 0;
 	}
 
-	MySplit(int t) : ZSplitWndV(t)
+	MySplit(int t) : ZSplitWnd(true, t, (HBRUSH)(1+COLOR_WINDOW))
 	{
 		_hFont = 0;
 		_hFont2 = 0;
@@ -950,7 +950,7 @@ class ZMainWnd : public ZSDIFrameWnd
 	{
 		if (MySplit* p = new MySplit(nWidth>>2))
 		{
-			_hwnd = p->Create(0, 0, WS_CHILD|WS_VISIBLE|WS_BORDER, x - 1, y, nWidth + 2, nHeight + 1, hwnd, 0, 0);
+			_hwnd = p->Create(0, 0, WS_CHILD|WS_VISIBLE|WS_CLIPCHILDREN, x, y, nWidth, nHeight, hwnd, 0, 0);
 			p->Release();
 		}
 
@@ -967,7 +967,7 @@ class ZMainWnd : public ZSDIFrameWnd
 		return FALSE;
 	}
 
-	BOOL ZMainWnd::CreateTB(HWND hwnd)
+	BOOL CreateTB(HWND hwnd)
 	{
 		static TBBUTTON g_btns[] = {
 			{IMAGE_ICON, ID_REFRESH, TBSTATE_ENABLED, BTNS_AUTOSIZE, {}, (DWORD_PTR)L" Refresh ", -1},
@@ -1071,41 +1071,10 @@ void zmain()
 	}
 }
 
-#ifdef _X86_
-extern "C"
-{
-	uintptr_t __security_cookie;
-
-	void __fastcall __security_check_cookie(__in uintptr_t _StackCookie)
-	{
-		if (__security_cookie != _StackCookie)
-		{
-			__debugbreak();
-		}
-	}
-
-	BOOL __cdecl _ValidateImageBase(PVOID pImageBase)
-	{
-		return NT::RtlImageNtHeader(pImageBase) != 0;
-	}
-
-	PIMAGE_SECTION_HEADER __cdecl _FindPESection(PVOID pImageBase, ULONG rva)
-	{
-		return NT::RtlImageRvaToSection(NT::RtlImageNtHeader(pImageBase), pImageBase, rva);
-	}
-
-#pragma comment(linker, "/include:@__security_check_cookie@4")
-#pragma comment(linker, "/include:__ValidateImageBase")
-#pragma comment(linker, "/include:__FindPESection")
-
-}
-#endif
 void ep(void*)
 {
 	initterm();
-
 	zmain();
-
 	destroyterm();
 
 	ExitProcess(0);

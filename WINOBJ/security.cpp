@@ -358,7 +358,7 @@ NTSTATUS DumpACEList(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, ULONG AceCount, 
 		}
 
 		ACCESS_MASK Mask = pah->Mask;
-		sprintf_s(sz2, "%08X", Mask);
+		sprintf_s(sz2, _countof(sz2), "%08X", Mask);
 
 		switch (pah->Header.AceType)
 		{
@@ -376,7 +376,7 @@ NTSTATUS DumpACEList(WLog& log, LSA_LOOKUP_HANDLE PolicyHandle, ULONG AceCount, 
 			sz2[3] = 0;
 			break;
 		default:
-			sprintf_s(sz, "0x%x", pah->Header.AceType);
+			sprintf_s(sz, _countof(sz), "0x%x", pah->Header.AceType);
 		}
 
 		if (0 > RtlConvertSidToUnicodeString(&StringSid, Sid, TRUE))

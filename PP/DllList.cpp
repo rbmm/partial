@@ -5,8 +5,8 @@
 #include "../ntver/nt_ver.h"
 _NT_BEGIN
 #include "../inc/initterm.h"
-#include "common.h"
 #include "../winz/split.h"
+#include "common.h"
 #include "qpm.h"
 
 #include "../tkn/tkn.h"
@@ -315,7 +315,7 @@ void InitTreeView(HWND hwnd, PSYSTEM_PROCESS_INFORMATION pspi)
 	_pspi->NextEntryOffset = _NextEntryOffset;
 }
 
-class MySplit : public ZSplitWndV
+class MySplit : public ZSplitWnd
 {
 	NAMES* _pTable = 0;
 	PSYSTEM_PROCESS_INFORMATION _pspi = 0, _pspiCurrent = 0;
@@ -626,7 +626,7 @@ class MySplit : public ZSplitWndV
 
 		if (lt)
 		{
-			if (hwnd = CreateWindowExW(0, WC_TREEVIEW, 0, WS_CHILD|WS_VISIBLE|
+			if (hwnd = CreateWindowExW(0, WC_TREEVIEW, 0, WS_CHILD|WS_VISIBLE|WS_BORDER|
 				TVS_LINESATROOT|TVS_HASLINES|TVS_HASBUTTONS|TVS_DISABLEDRAGDROP|
 				TVS_TRACKSELECT|TVS_EDITLABELS|TVS_INFOTIP, x, y, nWidth, nHeight, hwndParent, (HMENU)1, 0, 0))
 			{
@@ -645,7 +645,8 @@ class MySplit : public ZSplitWndV
 		else
 		{
 			if (hwnd = CreateWindowExW(0, WC_LISTVIEW, 0, 
-				WS_VISIBLE|WS_CHILD|LVS_REPORT|LVS_SHOWSELALWAYS|LVS_OWNERDATA|LVS_SHAREIMAGELISTS|LVS_SINGLESEL|WS_HSCROLL|WS_VSCROLL,
+				WS_VISIBLE|WS_CHILD|LVS_REPORT|LVS_SHOWSELALWAYS|LVS_OWNERDATA|
+				LVS_SHAREIMAGELISTS|LVS_SINGLESEL|WS_HSCROLL|WS_VSCROLL|WS_BORDER,
 				x, y, nWidth, nHeight, hwndParent, (HMENU)2, 0, 0))
 			{
 				SetWindowTheme(hwnd, L"Explorer", 0);
@@ -793,7 +794,7 @@ class MySplit : public ZSplitWndV
 
 public:
 
-	MySplit(int t) : ZSplitWndV(t)
+	MySplit(int t) : ZSplitWnd(TRUE, t, (HBRUSH)(1+COLOR_WINDOW))
 	{
 		static WORD id[] = { IDR_MENU1 };
 		_himl = CreateIL((HINSTANCE)&__ImageBase, 16, 16, ILC_COLOR32, RTL_NUMBER_OF(id), id);
@@ -1138,7 +1139,7 @@ LRESULT MySplit::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 			break;
 		}
 	}
-	return ZSplitWndV::WindowProc(hwnd, uMsg, wParam, lParam);
+	return ZSplitWnd::WindowProc(hwnd, uMsg, wParam, lParam);
 }
 
 class ZMainWnd : public ZSDIFrameWnd
@@ -1161,7 +1162,7 @@ class ZMainWnd : public ZSDIFrameWnd
 	{
 		if (MySplit* p = new MySplit(nWidth>>2))
 		{
-			_hwnd = p->Create(0, 0, WS_CHILD|WS_VISIBLE|WS_BORDER, x - 1, y, nWidth + 2, nHeight + 1, hwnd, 0, 0);
+			_hwnd = p->Create(0, 0, WS_CHILD|WS_VISIBLE|WS_CLIPCHILDREN, x, y, nWidth, nHeight, hwnd, 0, 0);
 			p->Release();
 		}
 

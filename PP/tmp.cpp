@@ -30,9 +30,9 @@ BOOL Impersonate(PCLIENT_ID ClientId)
 	return f;
 }
 
-PCSTR GetLogonTypeName(ULONG LogonType, PSTR buf)
+PCWSTR GetLogonTypeName(ULONG LogonType, PWSTR buf, ULONG cch)
 {
-#define CASE_LT(x) case x: return #x;
+#define CASE_LT(x) case x: return L#x;
 
 	switch(LogonType)
 	{
@@ -51,8 +51,75 @@ PCSTR GetLogonTypeName(ULONG LogonType, PSTR buf)
 			CASE_LT(CachedUnlock)
 	}
 
-	sprintf(buf, "%x", LogonType);
+	swprintf_s(buf, cch, L"%x", LogonType);
 	return buf;
+}
+
+PWSTR FormatUserFlags(LONG UserFlags, PWSTR loc_buf, ULONG loc_cch)
+{
+	static const PCWSTR _S_szFlags[32] = {
+		L"GUEST",
+		L"NOENCRYPTION",
+		L"CACHED_ACCOUNT",
+		L"USED_LM_PASSWORD",
+		0,
+		L"EXTRA_SIDS",
+		L"SUBAUTH_SESSION_KEY",
+		L"SERVER_TRUST_ACCOUNT",
+		L"NTLMV2_ENABLED",
+		L"RESOURCE_GROUPS",
+		L"PROFILE_PATH_RETURNED",
+		L"NT_V2",
+		L"LM_V2",
+		L"NTLM_V2",
+		L"OPTIMIZED",
+		L"WINLOGON",
+		L"PKINIT",
+		L"NO_OPTIMIZED",
+		L"NO_ELEVATION",
+		L"MANAGED_SERVICE",
+	};
+
+	SIZE_T cch = 0;
+	PCWSTR pcsz;
+	int i = 32;
+	do 
+	{
+		if (_bittest(&UserFlags, --i) && (pcsz = _S_szFlags[i]))
+		{
+			// \t\t%s\r\n
+			cch += wcslen(pcsz) + 4;
+		}
+	} while (i);
+
+	if (!cch)
+	{
+		*loc_buf = 0;
+		return loc_buf;
+	}
+
+	if (PWSTR buf = ++cch > loc_cch ? new WCHAR[cch] : loc_buf)
+	{
+		PWSTR psz = buf;
+		i = 32;
+		do 
+		{
+			if (_bittestandreset(&UserFlags, --i) && (pcsz = _S_szFlags[i]))
+			{
+				int len = swprintf_s(psz, cch, L"\t\t%s\r\n", pcsz);
+				if (0 >= len)
+				{
+					delete [] buf;
+					return 0;
+				}
+				psz += len, cch -= len;
+			}
+		} while (UserFlags);
+
+		return buf;
+	}
+
+	return 0;
 }
 
 BOOL Impersonate(PVOID buf)
@@ -253,16 +320,18 @@ void DumpSessions(WLog& log, PVOID pspi)
 				else
 				{
 					TIME_FIELDS tf;
-					char cc[16];
+					WCHAR cc[16], buf[0x80];
 
 					RtlTimeToTimeFields(&LogonSessionData->LogonTime, &tf);
 
-					PSID Sid = LogonSessionData->Sid;
+					PWSTR pszFlags = FormatUserFlags(LogonSessionData->UserFlags, buf, _countof(buf));
 
 					log(L"=================================================\r\n"
 						L"LogonId:\t%08x-%08x\r\n"
 						L"Session:\t%u\r\n"
-						L"LogonType:\t%S\r\n" 
+						L"LogonType:\t%s\r\n" 
+						L"UserFlags:\t%08x\r\n"
+						L"%s"
 						L"LogonTime\t%u-%02u-%02u %02u:%02u:%02u\r\n"
 						L"Username:\t%wZ\r\n"
 						L"LogonDomain:\t%wZ\r\n"
@@ -272,7 +341,8 @@ void DumpSessions(WLog& log, PVOID pspi)
 						L"Sid:",
 						LogonSessionData->LogonId.HighPart, LogonSessionData->LogonId.LowPart,
 						LogonSessionData->Session,
-						GetLogonTypeName(LogonSessionData->LogonType, cc),
+						GetLogonTypeName(LogonSessionData->LogonType, cc, _countof(cc)),
+						LogonSessionData->UserFlags, pszFlags,
 						tf.Year, tf.Month, tf.Day, tf.Hour, tf.Minute, tf.Second,
 						&LogonSessionData->UserName, 
 						&LogonSessionData->LogonDomain, 
@@ -281,7 +351,12 @@ void DumpSessions(WLog& log, PVOID pspi)
 						&LogonSessionData->DnsDomainName 
 						);
 
-					if (Sid)
+					if (pszFlags && pszFlags != buf)
+					{
+						delete [] pszFlags;
+					}
+
+					if (PSID Sid = LogonSessionData->Sid)
 					{
 						UNICODE_STRING us;
 

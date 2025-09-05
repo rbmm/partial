@@ -153,7 +153,7 @@ void els3(WLog& log, PVOID buf)
 		if (cid.UniqueProcess)
 		{
 			HANDLE hProcess;
-			NTSTATUS status = MyOpenProcess(&hProcess, PROCESS_QUERY_INFORMATION, &zoa, &cid);
+			NTSTATUS status = MyOpenProcess(&hProcess, PROCESS_QUERY_LIMITED_INFORMATION, &zoa, &cid);
 			if (0 > status)
 			{
 				log(L"[                  ] %04x(%04x) Open(%wZ)=%x\r\n", 

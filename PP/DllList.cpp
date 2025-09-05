@@ -592,20 +592,23 @@ class MySplit : public ZSplitWnd
 		{
 			SetDllCount(count);
 
-			if (PROCESS_MODULE** ppm = (PROCESS_MODULE**)_pTable->malloca(count * sizeof(PROCESS_MODULE*)))
+			if (count)
 			{
-				_ppm = ppm, cItems = count, _cItems = count;
-
-				do 
+				if (PROCESS_MODULE** ppm = (PROCESS_MODULE**)_pTable->malloca(count * sizeof(PROCESS_MODULE*)))
 				{
-					*ppm++ = pm++;
-				} while (--count);
+					_ppm = ppm, cItems = count, _cItems = count;
 
-				ULONG iSubItem = _iSubItem;
-				if (iSubItem < CID_MAX)
-				{
-					_bittestandcomplement(&_sortBits, iSubItem);
-					ColumClick(_hwndLV, iSubItem);
+					do 
+					{
+						*ppm++ = pm++;
+					} while (--count);
+
+					ULONG iSubItem = _iSubItem;
+					if (iSubItem < CID_MAX)
+					{
+						_bittestandcomplement(&_sortBits, iSubItem);
+						ColumClick(_hwndLV, iSubItem);
+					}
 				}
 			}
 		}
@@ -1144,10 +1147,7 @@ LRESULT MySplit::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
 class ZMainWnd : public ZSDIFrameWnd
 {
-	HWND _hwnd;
 	LONG _maskCurrent, _maskNew;
-
-	virtual LRESULT WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 	virtual BOOL CreateSB(HWND hwnd);
 	virtual BOOL CreateTB(HWND hwnd);
@@ -1162,11 +1162,11 @@ class ZMainWnd : public ZSDIFrameWnd
 	{
 		if (MySplit* p = new MySplit(nWidth>>2))
 		{
-			_hwnd = p->Create(0, 0, WS_CHILD|WS_VISIBLE|WS_CLIPCHILDREN, x, y, nWidth, nHeight, hwnd, 0, 0);
+			_hwndView = p->Create(0, 0, WS_CHILD|WS_VISIBLE|WS_CLIPCHILDREN, x, y, nWidth, nHeight, hwnd, 0, 0);
 			p->Release();
 		}
 
-		return _hwnd != 0;
+		return _hwndView != 0;
 	}
 };
 
@@ -1201,17 +1201,6 @@ BOOL ZMainWnd::CreateTB(HWND hwnd)
 
 	return ZToolBar::Create(hwnd, (HINSTANCE)&__ImageBase, 0, 0, 16, 16, 
 		g_btns, g_nt_ver.Version < _WIN32_WINNT_WIN8 ? _countof(g_btns) - 1 : _countof(g_btns), TRUE) != 0;
-}
-
-LRESULT ZMainWnd::WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
-{
-	switch (uMsg)
-	{
-	case WM_COMMAND:
-		SendMessage(_hwnd, WM_COMMAND, wParam, 0);
-		break;
-	}
-	return ZSDIFrameWnd::WindowProc(hwnd, uMsg, wParam, lParam);
 }
 
 void zmain()
